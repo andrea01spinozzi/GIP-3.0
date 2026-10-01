@@ -465,13 +465,13 @@ def categorize_volcano(res_tbl: pd.DataFrame, padj_cutoff: float = 0.05,
     is_up = df["log2FoldChange"] >= lfc_cutoff
     is_down = df["log2FoldChange"] <= -lfc_cutoff
 
-    condizioni = [
+    conditions = [
         is_sig & is_up,
         is_sig & is_down
     ]
-    scelte = ["Upregulated", "Downregulated"]
+    choices = ["Upregulated", "Downregulated"]
 
-    df["status"] = np.select(condizioni, scelte, default="Not Significant")
+    df["status"] = np.select(conditions, choices, default="Not Significant")
     return df
 
 
