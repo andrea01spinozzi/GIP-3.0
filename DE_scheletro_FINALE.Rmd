@@ -15,10 +15,6 @@ library(clusterProfiler)
 library(org.Hs.eg.db)
 library(limma)
 library(BiocParallel)
-
-# Su Windows i worker paralleli (PSOCK) possono andare in crash ("errore di scrittura sulla connessione").
-# Forziamo l'esecuzione seriale: piu' lenta in teoria, ma stabile.
-register(SerialParam())
 ```
 
 # 2. FUNZIONI DI PULIZIA (Standardizzazione Input)
