@@ -13,4 +13,5 @@ Transcriptomic analysis is now central to biology and medicine, but doing it pro
 
 GIP was developed to remove these barriers. The statistics rely on established R/Bioconductor packages, but they are hidden behind a graphical interface, so choosing a cohort, defining a comparison and obtaining publication-ready figures takes a few clicks instead of a script. The output of StandHard is directly the input of GIP, so you can go from public data to results without manual file handling. Your data stay on your machine, and the whole workflow stays transparent and reproducible.
 
-Requirements: Python 3.11+ and R with the required Bioconductor packages (installed with a single script). Available for Windows and macOS.
+# Requirements
+Python 3.11+ and R with the required Bioconductor packages (installed with a single script). Available for Windows and macOS.
