@@ -3,7 +3,7 @@ title: "DE_scheletro"
 output: html_notebook
 --- 
 
-# 1. LIBRERIE
+# 1. LIBRARIES
 ```{r}
 library(tidyverse) 
 library(readxl)
@@ -17,7 +17,7 @@ library(limma)
 library(BiocParallel)
 ```
 
-# 2. FUNZIONI DI PULIZIA (Standardizzazione Input)
+# 2. CLEANING FUNCTIONS (Input Standardization)
 ```{r}
 clean_identifiers <- function(x) {
   if (is.null(x)) return(NULL)
@@ -47,7 +47,7 @@ clean_identifiers <- function(x) {
   } else if (ext == "json") {
     df <- jsonlite::fromJSON(path, flatten = TRUE)
   } else {
-    stop("Formato file non supportato: ", ext)
+    stop("Unsupported file format: ", ext)
   }
   
   return(as.data.frame(df))
@@ -74,7 +74,7 @@ clean_identifiers <- function(x) {
 }
 ```
 
-# 3. FUNZIONI DI IMPORTAZIONE
+# 3. IMPORT FUNCTIONS
 ```{r}
 import_expression <- function(path, gene_col = 1, is_microarray = FALSE) {
   df <- .read_flexible(path)
@@ -90,7 +90,7 @@ import_expression <- function(path, gene_col = 1, is_microarray = FALSE) {
     if (is.character(col)) {
       col <- gsub(",", ".", col) # Correggi virgole italiane
     }
-    as.numeric(as.character(col)) # Forza la conversione in numero
+    as.numeric(as.character(col)) # Force conversion to numeric
   }))
   
   clean_genes <- .convert_gene_ids(genes)
@@ -136,50 +136,50 @@ import_metadata <- function(path, sample_col = 1, condition_col = NULL) {
   return(df)
 }
 
-# Estrazione automatica delle etichette di gruppo dal metadata: restituisce i gruppi (condizioni) unici disponibili, così l'utente può sceglierne 2 (o piu', per confronti a coppie) senza doverli scrivere a mano.
+# Automatic extraction of group labels from the metadata: returns the unique groups (conditions) available, so the user can pick 2 (or more, for pairwise comparisons) without typing them by hand.
 get_available_groups <- function(metadata) {
   if (!"condition" %in% colnames(metadata)) {
-    stop("La colonna 'condition' non è presente nel metadata. Hai specificato condition_col in import_metadata()?")
+    stop("The 'condition' column is not present in the metadata. Did you specify condition_col in import_metadata()?")
   }
   groups <- sort(unique(as.character(metadata$condition)))
-  n_campioni <- table(as.character(metadata$condition))
+  n_samples <- table(as.character(metadata$condition))
   
-  cat(">>> Gruppi disponibili nel dataset:\n")
+  cat(">>> Groups available in the dataset:\n")
   for (g in groups) {
-    cat(sprintf(" - %s (n = %d campioni)\n", g, n_campioni[g]))
+    cat(sprintf(" - %s (n = %d samples)\n", g, n_samples[g]))
   }
   
   if (length(groups) < 2) {
-    warning("Attenzione: è stato trovato un solo gruppo. Servono 2 gruppi per un confronto DEA.")
+    warning("Warning: only one group was found. 2 groups are needed for a DEA comparison.")
   }
   
   return(groups)
 }
 ```
 
-# 4. MOTORE DEA
+# 4. DEA ENGINE
 ```{r}
-# Validazione del contrasto scelto dall'utente: controlla che l'utente abbia scelto ESATTAMENTE 2 gruppi tra quelli realmente presenti nel metadata, prima di lanciare DESeq2/limma.
+# Validation of the contrast chosen by the user: checks that EXACTLY 2 groups were chosen among those actually present in the metadata, before launching DESeq2/limma.
 validate_contrast <- function(metadata, contrast) {
   if (!"condition" %in% colnames(metadata)) {
-    stop("La colonna 'condition' non e' presente nel metadata.")
+    stop("The 'condition' column is not present in the metadata.")
   }
   groups <- unique(as.character(metadata$condition))
   
   if (length(contrast) != 2) {
-    stop("Il contrasto deve contenere ESATTAMENTE 2 gruppi (es. c('Malato','Sano')). ",
-         "Per confronti multipli tra piu' gruppi, usa run_all_pairwise_comparisons().")
+    stop("The contrast must contain EXACTLY 2 groups (e.g. c('Diseased','Healthy')). ",
+         "For multiple comparisons across more groups, use run_all_pairwise_comparisons().")
   }
   if (!all(contrast %in% groups)) {
-    mancanti <- contrast[!contrast %in% groups]
-    stop("Gruppo/i non trovato/i nel metadata: ", paste(mancanti, collapse = ", "),
-         "\nGruppi disponibili: ", paste(groups, collapse = ", "))
+    missing <- contrast[!contrast %in% groups]
+    stop("Group(s) not found in the metadata: ", paste(missing, collapse = ", "),
+         "\nAvailable groups: ", paste(groups, collapse = ", "))
   }
   invisible(TRUE)
 }
 
 run_differential_expression <- function(expr_matrix, metadata, method = "RNAseq", contrast = c("treated", "control")) {
-  # Validazione del confronto scelto dall'utente rispetto alle etichette reali del metadata
+  # Validation of the user-chosen comparison against the real labels in the metadata
   validate_contrast(metadata, contrast)
   
   samples_intersect <- intersect(colnames(expr_matrix), rownames(metadata))
@@ -189,7 +189,7 @@ run_differential_expression <- function(expr_matrix, metadata, method = "RNAseq"
   metadata$condition <- as.factor(metadata$condition)
   
   if (method == "RNAseq") {
-    message(">>> Eseguo modellizzazione DESeq2 per RNA-seq...")
+    message(">>> Running DESeq2 modelling for RNA-seq...")
     dds <- DESeqDataSetFromMatrix(countData = expr_matrix, colData = metadata, design = ~ condition)
     dds <- dds[rowSums(counts(dds)) >= 10, ] 
     
@@ -197,11 +197,11 @@ run_differential_expression <- function(expr_matrix, metadata, method = "RNAseq"
     dds <- tryCatch({
       estimateDispersions(dds)
     }, error = function(e) {
-      message(">>> [Nota] Il fit parametrico e' fallito. Tento il fit locale...")
+      message(">>> [Note] The parametric fit failed. Trying the local fit...")
       tryCatch({
         estimateDispersions(dds, fitType = "local")
       }, error = function(e2) {
-        message(">>> [Nota] Applico fitType = 'mean'...")
+        message(">>> [Note] Applying fitType = 'mean'...")
         estimateDispersions(dds, fitType = "mean")
       })
     })
@@ -213,7 +213,7 @@ run_differential_expression <- function(expr_matrix, metadata, method = "RNAseq"
       transmute(GeneID, log2FoldChange, pvalue, padj, stat)
     
   } else if (method == "Microarray") {
-    message(">>> Eseguo modellizzazione limma per Microarray...")
+    message(">>> Running limma modelling for Microarray...")
     design <- model.matrix(~ 0 + condition, data = metadata)
     colnames(design) <- gsub("condition", "", colnames(design))
     
@@ -229,16 +229,16 @@ run_differential_expression <- function(expr_matrix, metadata, method = "RNAseq"
       tibble::rownames_to_column("GeneID") %>%
       transmute(GeneID, log2FoldChange = logFC, pvalue = P.Value, padj = adj.P.Val, stat = t)
   } else {
-    stop("Metodo non valido: scegli 'RNAseq' o 'Microarray'")
+    stop("Invalid method: choose 'RNAseq' or 'Microarray'")
   }
   
   return(res_standard)
 }
 
-# Confronti multipli a coppie tra tutti i gruppi disponibili, utile quando nel metadata ci sono piu' di 2 gruppi (es. Sano, Farmaco_basso, Farmaco_alto) e si vogliono tutte le combinazioni pairwise (DESeq2/limma confrontano sempre 2 gruppi alla volta).
+# Pairwise comparisons across all available groups, useful when the metadata has more than 2 groups (e.g. Healthy, Drug_low, Drug_high) and all pairwise combinations are wanted (DESeq2/limma always compare 2 groups at a time).
 run_all_pairwise_comparisons <- function(expr_matrix, metadata, method = "RNAseq") {
   groups <- get_available_groups(metadata)
-  if (length(groups) < 2) stop("Servono almeno 2 gruppi per un confronto.")
+  if (length(groups) < 2) stop("At least 2 groups are needed for a comparison.")
   
   pairs <- combn(groups, 2, simplify = FALSE)
   results_list <- list()
@@ -249,11 +249,11 @@ run_all_pairwise_comparisons <- function(expr_matrix, metadata, method = "RNAseq
     results_list[[label]] <- run_differential_expression(expr_matrix, metadata,
                                                            method = method, contrast = p)
   }
-  return(results_list)  # lista nominata: results_list[["Farmaco vs Controllo"]]
+  return(results_list)  # named list: results_list[["Drug vs Control"]]
 }
 ```
 
-# 5. FUNZIONI GRAFICI E TABELLE
+# 5. PLOT AND TABLE FUNCTIONS
 ```{r}
 plot_universal_volcano <- function(res_tbl, padj_cutoff = 0.05, lfc_cutoff = 1, title = "Volcano Plot") {
   df_plot <- res_tbl %>%
@@ -282,7 +282,7 @@ plot_universal_pca <- function(expr_matrix, metadata, title = "PCA Plot") {
   expr_matrix <- expr_matrix[gene_variances > 0 & !is.na(gene_variances), ]
   
   if (nrow(expr_matrix) == 0) {
-    stop("Errore: Tutti i geni hanno varianza zero. Controlla i dati di input.")
+    stop("Error: all genes have zero variance. Check the input data.")
   }
   
   pca_res <- prcomp(t(expr_matrix), scale. = TRUE)
@@ -304,40 +304,40 @@ generate_ranked_gene_table <- function(res_tbl, padj_cutoff = 0.05) {
   res_tbl %>%
     filter(!is.na(pvalue)) %>%
     mutate(
-      Regolazione = ifelse(log2FoldChange > 0, "UP-regulated", "DOWN-regulated"),
-      Significativo = case_when(
+      Regulation = ifelse(log2FoldChange > 0, "UP-regulated", "DOWN-regulated"),
+      Significant = case_when(
         is.na(padj) ~ "NA",
-        padj < padj_cutoff ~ "SI",
-        TRUE ~ "NO"
+        padj < padj_cutoff ~ "Yes",
+        TRUE ~ "No"
       )
     ) %>%
-    dplyr::select(GeneID, Regolazione, Significativo, log2FoldChange, pvalue, padj, stat) %>%
-    arrange(desc(Significativo == "SI"), padj, desc(abs(log2FoldChange)))
+    dplyr::select(GeneID, Regulation, Significant, log2FoldChange, pvalue, padj, stat) %>%
+    arrange(desc(Significant == "Yes"), padj, desc(abs(log2FoldChange)))
 }
 ```
 
-# 6. FUNZIONI ARRICCHIMENTO
+# 6. ENRICHMENT FUNCTIONS
 
 ## 6a. ORA (Over-Representation Analysis)
 ```{r}
-# ORA: testa se un insieme di geni (DEG selezionati dai risultati DE, oppure una lista fornita dall'utente) e' sovra-rappresentato in ciascun pathway MSigDB (test ipergeometrico via clusterProfiler::enricher).
+# ORA: tests whether a set of genes (DEGs selected from the DE results, or a list supplied by the user) is over-represented in each MSigDB pathway (hypergeometric test via clusterProfiler::enricher).
 #
-# - gene_list = NULL  -> i geni vengono selezionati da res_tbl con padj_cutoff / lfc_cutoff / direction
-# - gene_list = c(...) -> ORA su una lista di geni specifici scelti dall'utente (simboli, Ensembl o Entrez)
-# - direction: "all" (UP + DOWN), "up" (solo UP-regulated), "down" (solo DOWN-regulated); vale solo se gene_list = NULL
+# - gene_list = NULL  -> genes are selected from res_tbl using padj_cutoff / lfc_cutoff / direction
+# - gene_list = c(...) -> ORA on a list of specific genes chosen by the user (symbols, Ensembl or Entrez)
+# - direction: "all" (UP + DOWN), "up" (UP-regulated only), "down" (DOWN-regulated only); applies only if gene_list = NULL
 #
-# L'universo (background) sono tutti i geni effettivamente testati nella DEA (pvalue non NA): usare l'intero genoma come background
-# darebbe risultati distorti, perche' i geni non espressi/filtrati non avrebbero mai potuto risultare DE.
+# The universe (background) is all genes actually tested in the DEA (non-NA pvalue): using the whole genome as background
+# would give biased results, because unexpressed/filtered genes could never have come out as DE.
 run_ora_analysis <- function(res_tbl, gene_list = NULL, direction = c("all", "up", "down"),
                              padj_cutoff = 0.05, lfc_cutoff = 1,
                              category = "H", subcategory = NULL, species = "Homo sapiens",
                              min_size = 15, max_size = 500, pvalue_cutoff = 0.05) {
   direction <- match.arg(direction)
   
-  # Universo: tutti i geni testati nella DEA
+  # Universe: all genes tested in the DEA
   universe <- unique(res_tbl$GeneID[!is.na(res_tbl$pvalue)])
   
-  # Selezione dei geni di input
+  # Selection of input genes
   if (is.null(gene_list)) {
     sel <- res_tbl %>% filter(!is.na(padj), padj < padj_cutoff)
     sel <- switch(direction,
@@ -349,25 +349,25 @@ run_ora_analysis <- function(res_tbl, gene_list = NULL, direction = c("all", "up
     origin <- sprintf("DEG (%s, padj < %.2f, |log2FC| >= %.1f)", direction, padj_cutoff, lfc_cutoff)
   } else {
     input_genes <- unique(.convert_gene_ids(gene_list))
-    origin <- "lista genica fornita dall'utente"
+    origin <- "user-supplied gene list"
   }
   
-  # Tengo solo i geni presenti nell'universo (requisito dell'ipergeometrico)
+  # Keep only genes present in the universe (hypergeometric requirement)
   n_before <- length(input_genes)
   input_genes <- intersect(input_genes, universe)
   if (length(input_genes) < n_before) {
-    message(sprintf(">>> [Nota] %d geni su %d non sono nell'universo testato e sono stati esclusi dall'ORA.",
+    message(sprintf(">>> [Note] %d of %d genes are not in the tested universe and were excluded from the ORA.",
                     n_before - length(input_genes), n_before))
   }
   
   if (length(input_genes) < 5) {
-    warning(sprintf("Solo %d geni disponibili per l'ORA (%s): troppo pochi per un test affidabile. ORA non eseguita.",
+    warning(sprintf("Only %d genes available for the ORA (%s): too few for a reliable test. ORA not run.",
                     length(input_genes), origin))
     return(NULL)
   }
-  message(sprintf(">>> ORA su %d geni [%s] - universo: %d geni", length(input_genes), origin, length(universe)))
+  message(sprintf(">>> ORA on %d genes [%s] - universe: %d genes", length(input_genes), origin, length(universe)))
   
-  # Gene set MSigDB
+  # MSigDB gene sets
   if (is.null(subcategory)) {
     m_df <- msigdbr(species = species, category = category)
   } else {
@@ -380,14 +380,14 @@ run_ora_analysis <- function(res_tbl, gene_list = NULL, direction = c("all", "up
     universe      = universe,
     TERM2GENE     = term2gene,
     pAdjustMethod = "BH",
-    pvalueCutoff  = 1,   # nessun filtro interno: il taglio di significativita' e' gestito a valle
+    pvalueCutoff  = 1,   # no internal filter: the significance cutoff is handled downstream
     qvalueCutoff  = 1,
     minGSSize     = min_size,
     maxGSSize     = max_size
   )
   
   if (is.null(ora) || nrow(ora@result) == 0) {
-    warning("Nessun pathway testabile per l'ORA con questi parametri.")
+    warning("No testable pathway for the ORA with these parameters.")
     return(NULL)
   }
   
@@ -399,8 +399,8 @@ run_ora_analysis <- function(res_tbl, gene_list = NULL, direction = c("all", "up
     ) %>%
     arrange(p.adjust, pvalue)
   
-  # Direzione: l'ORA NON la fornisce (e' un test su un insieme non orientato di geni). La ricaviamo a posteriori
-  # contando, tra i geni che sostengono ciascun pathway, quanti hanno log2FC > 0 (UP) e quanti < 0 (DOWN) nella DEA.
+  # Direction: ORA does NOT provide it (it is a test on an unordered set of genes). We derive it a posteriori
+  # by counting, among the genes supporting each pathway, how many have log2FC > 0 (UP) and how many < 0 (DOWN) in the DEA.
   lfc_lookup <- setNames(res_tbl$log2FoldChange, res_tbl$GeneID)
   dir_counts <- lapply(strsplit(ora_res$geneID, "/"), function(g) {
     l <- lfc_lookup[g]
@@ -409,7 +409,7 @@ run_ora_analysis <- function(res_tbl, gene_list = NULL, direction = c("all", "up
   ora_res$N_UP   <- unname(sapply(dir_counts, `[`, "up"))
   ora_res$N_DOWN <- unname(sapply(dir_counts, `[`, "down"))
   frac_up <- ora_res$N_UP / pmax(ora_res$N_UP + ora_res$N_DOWN, 1)
-  ora_res$Direzione <- case_when(frac_up >= 0.8 ~ "UP", frac_up <= 0.2 ~ "DOWN", TRUE ~ "MISTO")
+  ora_res$Direction <- case_when(frac_up >= 0.8 ~ "UP", frac_up <= 0.2 ~ "DOWN", TRUE ~ "MIXED")
   
   attr(ora_res, "n_input_genes") <- length(input_genes)
   attr(ora_res, "origin") <- origin
@@ -417,60 +417,60 @@ run_ora_analysis <- function(res_tbl, gene_list = NULL, direction = c("all", "up
   return(ora_res)
 }
 
-# Grafico ORA. Due modalita':
-# - type = "bar" (default): la significativita' e' la LUNGHEZZA della barra (-log10 padj), cioe' una posizione su un asse comune,
-#   che e' la codifica visiva piu' precisa e meno soggettiva. Ogni barra riporta esplicitamente k/K, fold enrichment e padj.
-# - type = "dot": dotplot classico (colore = padj, dimensione = n. geni), lasciato per confronto.
+# ORA plot. Two modes:
+# - type = "bar" (default): significance is the LENGTH of the bar (-log10 padj), i.e. a position on a common axis,
+#   which is the most precise and least subjective visual encoding. Each bar explicitly reports k/K, fold enrichment and padj.
+# - type = "dot": classic dotplot (colour = padj, size = n. genes), kept for comparison.
 plot_ora <- function(ora_res, type = c("bar", "dot"), top_n = 20, padj_cutoff = 0.05,
                      title = "Top Enriched Pathways (ORA)") {
   type <- match.arg(type)
   if (is.null(ora_res) || nrow(ora_res) == 0) {
-    warning("Nessun risultato ORA da rappresentare.")
+    warning("No ORA results to plot.")
     return(invisible(NULL))
   }
   
   n_signif <- sum(ora_res$p.adjust < padj_cutoff, na.rm = TRUE)
   
   if (n_signif == 0) {
-    warning(sprintf("Nessun pathway ha padj < %.2f. Mostro comunque i top %d pathway per p-value (non significativi), utile solo per esplorazione.",
+    warning(sprintf("No pathway has padj < %.2f. Showing the top %d pathways by p-value anyway (not significant, exploratory use only).",
                      padj_cutoff, top_n))
     plot_data <- ora_res %>% head(top_n)
-    subtitle_txt <- "Nessun pathway significativo (solo esplorativo)"
+    subtitle_txt <- "No significant pathway (exploratory only)"
   } else {
     if (n_signif < top_n) {
-      message(sprintf(">>> Solo %d pathway su %d richiesti hanno padj < %.2f. Mostro solo quelli.",
+      message(sprintf(">>> Only %d of the %d requested pathways have padj < %.2f. Showing only those.",
                        n_signif, top_n, padj_cutoff))
     }
     plot_data <- ora_res %>% filter(p.adjust < padj_cutoff) %>% head(top_n)
-    subtitle_txt <- sprintf("Pathway con padj < %.2f", padj_cutoff)
+    subtitle_txt <- sprintf("Pathways with padj < %.2f", padj_cutoff)
   }
   
   n_in <- attr(ora_res, "n_input_genes")
-  if (!is.null(n_in)) subtitle_txt <- paste0(subtitle_txt, " | geni in input: ", n_in)
+  if (!is.null(n_in)) subtitle_txt <- paste0(subtitle_txt, " | input genes: ", n_in)
   
   plot_data <- plot_data %>%
     mutate(
       Description = gsub("^HALLMARK_", "", ID),
       Description = gsub("^GOBP_", "", Description),
       Description = gsub("_", " ", Description),
-      SetSize     = as.numeric(sub("/.*$", "", BgRatio)),          # K: geni del pathway presenti nell'universo
-      neglog10    = -log10(pmax(p.adjust, 1e-300)),                 # evita Inf se padj = 0
-      Etichetta   = sprintf("%d/%d geni (%d UP, %d DOWN) | FE %.1f | padj %.1e",
+      SetSize     = as.numeric(sub("/.*$", "", BgRatio)),          # K: pathway genes present in the universe
+      neglog10    = -log10(pmax(p.adjust, 1e-300)),                 # avoids Inf if padj = 0
+      Label   = sprintf("%d/%d genes (%d UP, %d DOWN) | FE %.1f | padj %.1e",
                             Count, SetSize, N_UP, N_DOWN, FoldEnrichment, p.adjust),
       Description = reorder(Description, neglog10)
     )
   
   if (type == "bar") {
-    ggplot(plot_data, aes(x = neglog10, y = Description, fill = Direzione)) +
+    ggplot(plot_data, aes(x = neglog10, y = Description, fill = Direction)) +
       geom_col(width = 0.7) +
-      scale_fill_manual(values = c("UP" = "firebrick", "DOWN" = "steelblue", "MISTO" = "grey60"),
-                        name = "Direzione\n(>= 80% dei geni)") +
-      geom_text(aes(label = Etichetta), hjust = -0.05, size = 3) +
+      scale_fill_manual(values = c("UP" = "firebrick", "DOWN" = "steelblue", "MIXED" = "grey60"),
+                        name = "Direction\n(>= 80% of genes)") +
+      geom_text(aes(label = Label), hjust = -0.05, size = 3) +
       geom_vline(xintercept = -log10(padj_cutoff), linetype = "dashed", color = "firebrick") +
       scale_x_continuous(expand = expansion(mult = c(0, 0.45))) +
       labs(x = expression(-log[10]~"(padj)"), y = NULL, title = title,
            subtitle = subtitle_txt,
-           caption = sprintf("Linea tratteggiata: padj = %.2f | k/K = geni in input / geni del pathway nell'universo | FE = fold enrichment", padj_cutoff)) +
+           caption = sprintf("Dashed line: padj = %.2f | k/K = input genes / pathway genes in the universe | FE = fold enrichment", padj_cutoff)) +
       theme_minimal() +
       theme(axis.text.y = element_text(size = 9, face = "bold"),
             panel.grid.major.y = element_blank())
@@ -479,7 +479,7 @@ plot_ora <- function(ora_res, type = c("bar", "dot"), top_n = 20, padj_cutoff = 
     ggplot(plot_data, aes(x = GeneRatioNum, y = Description)) +
       geom_point(aes(size = Count, color = p.adjust)) +
       scale_color_gradient(low = "firebrick", high = "steelblue", name = "padj") +
-      scale_size_continuous(name = "N. geni") +
+      scale_size_continuous(name = "N. genes") +
       labs(x = "Gene Ratio", y = NULL, title = title, subtitle = subtitle_txt) +
       theme_minimal() +
       theme(axis.text.y = element_text(size = 9, face = "bold"))
@@ -518,11 +518,11 @@ plot_top_pathways <- function(fgsea_res, top_n = 20, padj_cutoff = 0.05, title =
   n_signif <- sum(fgsea_res$padj < padj_cutoff, na.rm = TRUE)
   
   if (n_signif == 0) {
-    warning(sprintf("Nessun pathway ha padj < %.2f. Mostro comunque i top %d pathway per NES assoluto (non significativi), utile solo per esplorazione.",
+    warning(sprintf("No pathway has padj < %.2f. Showing the top %d pathways by absolute NES anyway (not significant, exploratory use only).",
                      padj_cutoff, top_n))
     plot_data <- fgsea_res %>% filter(!is.na(NES)) %>% head(top_n)
   } else if (n_signif < top_n) {
-    message(sprintf(">>> Solo %d pathway su %d richiesti hanno padj < %.2f. Mostro solo quelli.",
+    message(sprintf(">>> Only %d of the %d requested pathways have padj < %.2f. Showing only those.",
                      n_signif, top_n, padj_cutoff))
     plot_data <- fgsea_res %>% filter(!is.na(NES), padj < padj_cutoff)
   } else {
@@ -541,7 +541,7 @@ plot_top_pathways <- function(fgsea_res, top_n = 20, padj_cutoff = 0.05, title =
     scale_fill_manual(values = c("Up-regulated" = "firebrick", "Down-regulated" = "steelblue")) +
     labs(x = "Normalized Enrichment Score (NES)", y = NULL,
          title = title,
-         subtitle = sprintf("Pathway con padj < %.2f", padj_cutoff)) +
+         subtitle = sprintf("Pathways with padj < %.2f", padj_cutoff)) +
     theme_minimal() +
     theme(
       axis.text.y = element_text(size = 9, face = "bold"),
@@ -550,41 +550,41 @@ plot_top_pathways <- function(fgsea_res, top_n = 20, padj_cutoff = 0.05, title =
 }
 ```
 
-# 7. SIMULAZIONE E TEST COMPLETO
+# 7. SIMULATION AND FULL TEST
 ```{r}
-# --- AVVIO PIPELINE ---
+# --- PIPELINE START ---
 
-# 1. Caricamento dati
+# 1. Data loading
 counts <- import_expression("C:\\Users\\maran\\Downloads\\counts_test.tsv", gene_col = 1, is_microarray = FALSE)
 metadata <- import_metadata("C:\\Users\\maran\\Downloads\\metadata_test.tsv", sample_col = 1, condition_col = 2)
 
-# Estrazione dei gruppi disponibili -> l'utente sceglie qui i due gruppi da confrontare 
-gruppi_disponibili <- get_available_groups(metadata)
+# Extraction of available groups -> the user picks the two groups to compare here 
+available_groups <- get_available_groups(metadata)
 
-# 2. PCA Plot Esplorativo
-print(plot_universal_pca(counts, metadata, title = "PCA dei Dati di Conteggio"))
+# 2. Exploratory PCA Plot
+print(plot_universal_pca(counts, metadata, title = "PCA of Count Data"))
 
-# 3. Analisi Differenziale
-# L'utente sceglie il contrasto tra i gruppi stampati sopra da gruppi_disponibili. Se i gruppi scelti non esistono, validate_contrast() blocca l'esecuzione con un messaggio.
-res_tbl <- run_differential_expression(counts, metadata, method = "RNAseq", contrast = c("Farmaco", "Controllo"))
+# 3. Differential Analysis
+# The user chooses the contrast among the groups printed above in available_groups. If the chosen groups do not exist, validate_contrast() stops execution with a message.
+res_tbl <- run_differential_expression(counts, metadata, method = "RNAseq", contrast = c("Drug", "Control"))
 
-# 3b. (Opzionale) Se ci sono piu' di 2 gruppi e si vogliono TUTTI i confronti a coppie:
-# tutti_i_confronti <- run_all_pairwise_comparisons(counts, metadata, method = "RNAseq")
-# tutti_i_confronti[["Farmaco vs Controllo"]]  # accesso a un confronto specifico
+# 3b. (Optional) If there are more than 2 groups and ALL pairwise comparisons are wanted:
+# all_comparisons <- run_all_pairwise_comparisons(counts, metadata, method = "RNAseq")
+# all_comparisons[["Drug vs Control"]]  # access a specific comparison
 
 # 4. Volcano Plot
 print(plot_universal_volcano(res_tbl, title = "Volcano Plot - Output Standardizzato"))
 
-# 5. Generazione ed Esportazione Tabella Geni
-cat("\n>>> GENERAZIONE DELLA TABELLA GENERALE DEI RISULTATI ORDINATA <<<\n")
+# 5. Gene Table Generation and Export
+cat("\n>>> GENERATING THE SORTED GENERAL RESULTS TABLE <<<\n")
 risultati_ordinati <- generate_ranked_gene_table(res_tbl)
 print(head(risultati_ordinati, 10))
 write.csv(risultati_ordinati, "Risultati_Finali_DE_Ranked.csv", row.names = FALSE)
 
-# 6. Analisi ORA (Over-Representation Analysis) - eseguita PRIMA della GSEA, ma non alternativa ad essa
-cat("\n>>> Eseguo ORA sui pathway Hallmark (MSigDB)...\n")
+# 6. ORA (Over-Representation Analysis) - run BEFORE the GSEA, but not an alternative to it
+cat("\n>>> Running ORA on the Hallmark pathways (MSigDB)...\n")
 
-# 6a. ORA sui DEG (UP + DOWN insieme) selezionati con i cutoff di padj e log2FC
+# 6a. ORA on the DEGs (UP + DOWN together) selected with the padj and log2FC cutoffs
 ora_results <- run_ora_analysis(res_tbl, direction = "all",
                                 padj_cutoff = 0.05, lfc_cutoff = 1, category = "H")
 
@@ -594,19 +594,19 @@ if (!is.null(ora_results)) {
   print(plot_ora(ora_results, top_n = 15, title = "Top 15 Enriched Pathways (ORA - Hallmark)"))
 }
 
-# 6b. (Opzionale) ORA separata per geni UP e DOWN
+# 6b. (Optional) Separate ORA for UP and DOWN genes
 # ora_up   <- run_ora_analysis(res_tbl, direction = "up",   category = "H")
 # ora_down <- run_ora_analysis(res_tbl, direction = "down", category = "H")
-# print(plot_ora(ora_up,   title = "ORA - geni UP-regulated"))
-# print(plot_ora(ora_down, title = "ORA - geni DOWN-regulated"))
+# print(plot_ora(ora_up,   title = "ORA - UP-regulated genes"))
+# print(plot_ora(ora_down, title = "ORA - DOWN-regulated genes"))
 
-# 6c. (Opzionale) ORA su una lista di geni specifici scelti dall'utente
-# geni_di_interesse <- c("TP53", "MYC", "CDKN1A", "BAX", "MDM2", "CCND1", "E2F1", "BCL2")
-# ora_custom <- run_ora_analysis(res_tbl, gene_list = geni_di_interesse, category = "H")
-# print(plot_ora(ora_custom, title = "ORA - geni di interesse"))
+# 6c. (Optional) ORA on a list of specific genes chosen by the user
+# genes_of_interest <- c("TP53", "MYC", "CDKN1A", "BAX", "MDM2", "CCND1", "E2F1", "BCL2")
+# ora_custom <- run_ora_analysis(res_tbl, gene_list = genes_of_interest, category = "H")
+# print(plot_ora(ora_custom, title = "ORA - genes of interest"))
 
-# 7. Analisi GSEA e Grafico Pathway
-cat("\n>>> Eseguo FGSEA sui pathway Hallmark (MSigDB)...\n")
+# 7. GSEA Analysis and Pathway Plot
+cat("\n>>> Running FGSEA on the Hallmark pathways (MSigDB)...\n")
 gsea_results <- run_gsea_analysis(res_tbl, category = "H")
 
 print(plot_top_pathways(gsea_results, top_n = 15, title = "Top 15 Modulated Pathways (Hallmark)"))
