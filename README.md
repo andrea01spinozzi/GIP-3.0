@@ -75,13 +75,7 @@ main.py
 
 StandHard produces `counts_matrix_unito.tsv` and `metadata_unito.tsv`, which can be loaded directly into GIP.
 
-<img width="657" height="512" alt="PCA" src="https://github.com/user-attachments/assets/e52a256e-8e19-4138-ae74-b79c68f37985" />
-
-<img width="635" height="797" alt="Gene table" src="https://github.com/user-attachments/assets/b1c809e8-05f8-4790-a0d6-17062adc3c56" />
-
-<img width="646" height="681" alt="Volcan plot" src="https://github.com/user-attachments/assets/c58b519b-22b8-453b-ad1d-a3137b1b19aa" />
-
-<img width="650" height="665" alt="GSEA" src="https://github.com/user-attachments/assets/51d136f3-a79c-48b6-8b22-115025ab7e03" />
+<img width="918" height="1152" alt="Resume pics" src="https://github.com/user-attachments/assets/0a3bba2e-9ba1-4949-aa04-75dc15a5e761" />
 
 
 
