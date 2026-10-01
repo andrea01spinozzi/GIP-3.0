@@ -1,8 +1,3 @@
-"""
-GDC RNA-Seq (STAR - Counts) Downloader - versione Tkinter
-Avvio:  python gdc_rnaseq_gui.py
-Dipendenze: pip install requests pandas   (tkinter è incluso in Python)
-"""
 import gzip
 import io
 import os
@@ -11,16 +6,12 @@ import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tkinter import filedialog, messagebox, simpledialog, ttk
-
 import pandas as pd
 import requests
 
 API = "https://api.gdc.cancer.gov"
 TIMEOUT = 60
 ANY = "(qualsiasi)"
-
-# Tendine: (etichetta, campo GDC). I VALORI di ogni tendina sono letti dal server
-# e dipendono da tutte le ALTRE tendine già impostate (ordine libero).
 FACETS = [
     ("Progetto", "cases.project.project_id"),
     ("Sito primario (organo)", "cases.primary_site"),
@@ -39,7 +30,6 @@ LABEL = dict((f, l) for l, f in FACETS)
 SAMPLE_TYPE_FIELD = "cases.samples.sample_type"
 
 
-# ----------------------------------------------------------------- API helpers
 def _in(field, values):
     return {"op": "in", "content": {"field": field, "value": list(values)}}
 
@@ -99,12 +89,11 @@ def download_counts(file_id):
             df = pd.read_csv(io.BytesIO(raw), sep="\t", comment="#", usecols=["gene_id", "unstranded"])
             df = df[~df["gene_id"].str.startswith("N_")]
             return file_id, df.set_index("gene_id")["unstranded"]
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  
             last = e
     raise RuntimeError(f"{file_id}: {last}")
 
 
-# ------------------------------------------------------------------------- GUI
 class App:
     def __init__(self, root):
         self.root = root
@@ -114,15 +103,15 @@ class App:
         self.pool = ThreadPoolExecutor(max_workers=8)
         self.gen = 0
         self.sel = {f: None for _, f in FACETS}
-        self.maps = {f: {} for _, f in FACETS}        # etichetta combobox -> valore
+        self.maps = {f: {} for _, f in FACETS}      
         self.vars, self.boxes = {}, {}
         self.total = 0
-        self.groups = []                              # gruppi da scaricare
+        self.groups = []                           
         self._build()
         self.refresh()
         self.root.after(100, self.poll)
 
-    # ---- costruzione interfaccia
+
     def _build(self):
         top = ttk.LabelFrame(self.root, text="1. Filtri collegati al GDC (puoi usarli in qualsiasi ordine)")
         top.pack(fill="x", padx=10, pady=8)
@@ -174,7 +163,7 @@ class App:
         self.msg = ttk.Label(bot, text="")
         self.msg.pack(side="left")
 
-    # ---- filtri collegati
+
     def on_select(self, field):
         label = self.vars[field].get()
         self.sel[field] = None if label == ANY else self.maps[field].get(label)
@@ -201,13 +190,13 @@ class App:
     def _facet_job(self, g, field, filters):
         try:
             self.q.put(("facet", g, field, fetch_facet(field, filters)))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  
             self.q.put(("err", g, field, str(e)))
 
     def _total_job(self, g, filters):
         try:
             self.q.put(("total", g, None, fetch_total(filters)))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  
             self.q.put(("err", g, "totale", str(e)))
 
     def poll(self):
@@ -228,7 +217,7 @@ class App:
                     self.msg.config(text="Errore")
                     messagebox.showerror("Errore", payload)
                 elif g != self.gen:
-                    continue                                # risposta obsoleta
+                    continue                            
                 elif kind == "facet":
                     need_refresh |= self._apply_facet(field, payload)
                 elif kind == "total":
@@ -255,10 +244,10 @@ class App:
             if val == cur:
                 self.vars[field].set(lab)
                 return False
-        self.sel[field], _ = None, self.vars[field].set(ANY)   # valore non più compatibile
+        self.sel[field], _ = None, self.vars[field].set(ANY)   
         return True
 
-    # ---- gruppi
+
     def add_group(self):
         if self.total <= 0:
             messagebox.showwarning("Nessun dato", "Nessun file corrisponde ai filtri correnti.")
@@ -293,7 +282,7 @@ class App:
             g["n"] = n
             self._redraw()
 
-    # ---- download + merge
+
     def start_download(self):
         if not self.groups:
             messagebox.showwarning("Nessun gruppo", "Aggiungi almeno un gruppo.")
@@ -332,7 +321,7 @@ class App:
                     try:
                         fid, s = f.result()
                         series[fid] = s
-                    except Exception as e:  # noqa: BLE001
+                    except Exception as e: 
                         errors.append(str(e))
                     self.q.put(("prog", done, len(chosen), None))
 
@@ -350,7 +339,7 @@ class App:
             if errors:
                 txt += f"\n\n{len(errors)} file non scaricati."
             self.q.put(("done", 0, None, txt))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e: 
             self.q.put(("fail", 0, None, str(e)))
 
 
