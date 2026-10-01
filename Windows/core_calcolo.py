@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 import os
 import re
@@ -9,14 +10,17 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
 import pandas as pd
 
 THIS_DIR = Path(__file__).resolve().parent
 CORE_R_PATH = THIS_DIR / "DE_scheletro_FINALE.Rmd"
 RUNNER_R_PATH = THIS_DIR / "run_pipeline.R"
 
+
 class RPipelineError(RuntimeError):
     pass
+
 
 def find_rscript() -> Optional[str]:
     exe = shutil.which("Rscript") or shutil.which("Rscript.exe")
@@ -73,6 +77,7 @@ def check_environment() -> list[str]:
         problems.append(f"run_pipeline.R not found at: {RUNNER_R_PATH}")
     return problems
 
+
 def parse_r_error(raw_error: str) -> str:
     raw_err_lower = raw_error.lower()
 
@@ -113,6 +118,7 @@ def parse_r_error(raw_error: str) -> str:
 
     return raw_error  
 
+
 def validate_inputs(counts_path: str, metadata_path: str,
                     sample_col: int | str = 1, condition_col: int | str = 2,
                     gene_col: int | str = 1, min_reads: int = 10, min_samples: int = 3) -> None:
@@ -123,6 +129,7 @@ def validate_inputs(counts_path: str, metadata_path: str,
         raise ValueError(f"The counts file does not exist: {counts_path}")
     if not m_path.exists():
         raise ValueError(f"The metadata file does not exist: {metadata_path}")
+
     if min_reads < 0:
         raise ValueError("The minimum number of reads (min_reads) cannot be negative.")
     if min_samples < 1:
@@ -163,7 +170,7 @@ def validate_inputs(counts_path: str, metadata_path: str,
     meta_df[cond_name] = (
         meta_df[cond_name]
         .astype(str)
-        .str.replace(r"[^a-zA-Z0-9_]", "_", regex=True) 
+        .str.replace(r"[^a-zA-Z0-9_]", "_", regex=True)  
         .str.replace(r"__+", "_", regex=True)           
         .str.strip("_"))
 
@@ -209,7 +216,7 @@ class PipelineConfig:
     condition_col: int | str = 2
     counts_path: Optional[str] = None
     gene_col: int | str = 1
-    method: str = "RNAseq"           
+    method: str = "RNAseq"        
     contrast: Optional[list] = None  
     pairwise_all: bool = False
     padj_cutoff: float = 0.05
@@ -218,7 +225,7 @@ class PipelineConfig:
     gsea_subcategory: Optional[str] = None
 
     run_ora: bool = True
-    ora_direction: str = "all"       
+    ora_direction: str = "all"     
 
     min_reads: int = 10
     min_samples: int = 3
@@ -248,6 +255,7 @@ class PipelineConfig:
             "core_path": str(CORE_R_PATH),
         }
         return d
+
 
 def _run_rscript(config: PipelineConfig, log_callback=None) -> Path:
     rscript = find_rscript()
@@ -330,16 +338,17 @@ def list_groups(metadata_path: str, sample_col=1, condition_col=2,
     cleanup_out_dir(str(out_dir))
     return data
 
+
 @dataclass
 class DEAResult:
     tag: str
-    res_tbl: pd.DataFrame                
-    ranked_tbl: pd.DataFrame               
-    gsea_tbl: Optional[pd.DataFrame]     
-    group_high: Optional[str] = None      
-    group_low: Optional[str] = None        
+    res_tbl: pd.DataFrame              
+    ranked_tbl: pd.DataFrame         
+    gsea_tbl: Optional[pd.DataFrame]    
+    group_high: Optional[str] = None    
+    group_low: Optional[str] = None    
     ora_tbl: Optional[pd.DataFrame] = None  
-    ora_meta: Optional[dict] = None        
+    ora_meta: Optional[dict] = None    
 
 
 @dataclass
@@ -347,7 +356,7 @@ class RunResults:
     pca_data: pd.DataFrame
     pca_x_label: str
     pca_y_label: str
-    per_contrast: dict 
+    per_contrast: dict  
 
 
 def run_dea(counts_path: str, metadata_path: str, method: str,
@@ -355,7 +364,7 @@ def run_dea(counts_path: str, metadata_path: str, method: str,
             contrast: Optional[list] = None, pairwise_all: bool = False,
             padj_cutoff: float = 0.05, lfc_cutoff: float = 1.0,
             gsea_category: str = "H", gsea_subcategory: Optional[str] = None,
-            min_reads: int = 10, min_samples: int = 3,  # Nuovi parametri
+            min_reads: int = 10, min_samples: int = 3, 
             out_dir: Optional[str] = None, log_callback=None,
             min_counts=0,
             run_ora: bool = True, ora_direction: str = "all") -> RunResults:
@@ -455,13 +464,16 @@ def categorize_volcano(res_tbl: pd.DataFrame, padj_cutoff: float = 0.05,
     is_sig = df["padj"] < padj_cutoff
     is_up = df["log2FoldChange"] >= lfc_cutoff
     is_down = df["log2FoldChange"] <= -lfc_cutoff
+
     condizioni = [
         is_sig & is_up,
         is_sig & is_down
     ]
     scelte = ["Upregulated", "Downregulated"]
+
     df["status"] = np.select(condizioni, scelte, default="Not Significant")
     return df
+
 
 def filter_top_pathways(gsea_tbl: pd.DataFrame, top_n: int = 20,
                         padj_cutoff: float = 0.05) -> tuple[pd.DataFrame, str]:
@@ -490,6 +502,7 @@ def filter_top_pathways(gsea_tbl: pd.DataFrame, top_n: int = 20,
     plot_data["Direction"] = plot_data["NES"].apply(lambda v: "Up-regulated" if v > 0 else "Down-regulated")
     plot_data = plot_data.sort_values("NES")
     return plot_data, msg
+
 
 def filter_top_ora(ora_tbl: pd.DataFrame, top_n: int = 20,
                    padj_cutoff: float = 0.05) -> tuple[pd.DataFrame, str]:
