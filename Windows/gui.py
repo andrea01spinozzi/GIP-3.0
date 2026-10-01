@@ -6,6 +6,9 @@ import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, colorchooser, simpledialog
 import ctypes
+import datetime
+import webbrowser
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -29,6 +32,7 @@ except ImportError:
     HAS_DND = False
 
 import core_calcolo as engine
+import report_pdf
 
 
 PALETTE = {
@@ -142,7 +146,10 @@ HELP_CONTENT = {
             "computation (DESeq2/limma + GSEA in R) is running; when finished you "
             "are automatically switched to the PCA tab.\n"
             "9. 'Reset fields' clears the whole file/columns/groups section so you "
-            "can start over."
+            "can start over.\n"
+            "10. Once the analysis has finished, 'Download PDF report' saves a "
+            "detailed report (parameters, PCA, volcano plot, top DEGs, GSEA, ORA "
+            "and the processing log for every contrast) as a PDF file."
         ),
     },
     "pca": {
@@ -1186,6 +1193,8 @@ class DEAApp(ttk.Frame):
         self.available_groups: list[str] = []
         self.group_vars: dict[str, tk.BooleanVar] = {}
         self.results: engine.RunResults | None = None
+        self.run_params: dict | None = None
+        self._pending_params: dict | None = None
         self.active_tag: tk.StringVar = tk.StringVar(value="")
 
         self._run_start_time: float | None = None
@@ -1295,17 +1304,17 @@ class DEAApp(ttk.Frame):
         header = tk.Frame(self, bg=PALETTE["accent"])
         header.pack(side=tk.TOP, fill=tk.X)
         try:
-            logo_icona = tk.PhotoImage(file="logo.png")
-            logo_piccolo = logo_icona.subsample(3, 3)
+            logo_icon = tk.PhotoImage(file="logo.png")
+            logo_small = logo_icon.subsample(3, 3)
         except tk.TclError:
-            logo_piccolo = None
+            logo_small = None
 
         inner = tk.Frame(header, bg=PALETTE["accent"])
         inner.pack(fill=tk.X, padx=24, pady=(16, 14))
 
-        if logo_piccolo is not None:
-            logo_header = tk.Label(inner, image=logo_piccolo, bg=PALETTE["accent"])
-            logo_header.image = logo_piccolo 
+        if logo_small is not None:
+            logo_header = tk.Label(inner, image=logo_small, bg=PALETTE["accent"])
+            logo_header.image = logo_small 
             logo_header.pack(side=tk.RIGHT, padx=15, pady=5)
 
         title_row = tk.Frame(inner, bg=PALETTE["accent"])
@@ -1509,6 +1518,12 @@ class DEAApp(ttk.Frame):
                                   "Enabled once the files have been selected.")
         self.progress = ttk.Progressbar(run_frame, mode="indeterminate", length=250)
         self.progress.pack(side=tk.LEFT, padx=14)
+        self.report_button = ttk.Button(run_frame, text="📄 Download PDF report",
+                                         command=self._export_pdf_report, state="disabled")
+        self.report_button.pack(side=tk.LEFT, padx=6, pady=6)
+        add_tip(self.report_button, "Saves a detailed PDF report of the analysis just completed: "
+                                     "parameters, PCA, volcano plot, top DEGs, GSEA, ORA and the "
+                                     "processing log. Enabled once an analysis has finished.")
 
         info = ("Tip: select the files, press 'Extract groups from metadata' to see the "
                 "available conditions, check EXACTLY 2 groups (or enable pairwise "
@@ -1974,6 +1989,29 @@ class DEAApp(ttk.Frame):
         run_ora = self.run_ora.get()
         ora_direction = self.ORA_DIRECTION_MAP.get(self.ora_direction_display.get(), "all")
 
+        # Snapshot of the settings used for this run (the widgets may change afterwards);
+        # it is what the PDF report documents.
+        self._pending_params = {
+            "counts_file": self.counts_path.get(),
+            "metadata_file": self.metadata_path.get(),
+            "method": self.method.get(),
+            "gene_col": self.gene_col.get(),
+            "sample_col": self.sample_col.get(),
+            "condition_col": self.condition_col.get(),
+            "contrast": list(contrast) if contrast else None,
+            "pairwise_all": self.pairwise_all.get(),
+            "padj_cutoff": self.padj_cutoff.get(),
+            "lfc_cutoff": self.lfc_cutoff.get(),
+            "min_counts": self.min_counts_var.get(),
+            "gsea_category": self.gsea_category.get(),
+            "gsea_subcategory": self.gsea_subcategory.get(),
+            "run_ora": run_ora,
+            "ora_direction": self.ora_direction_display.get(),
+            "top_n_pathways": self.top_n_pathways.get(),
+            "top_n_ora": self.top_n_ora.get(),
+            "started": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
         self.run_button.configure(state="disabled")
         self.progress.start(10)
         self._run_start_time = time.time()
@@ -2026,6 +2064,12 @@ class DEAApp(ttk.Frame):
 
     def _on_results_ready(self, results: engine.RunResults):
         self.results = results
+        self.run_params = dict(self._pending_params or {})
+        if self._run_start_time is not None:
+            mm, ss = divmod(int(time.time() - self._run_start_time), 60)
+            self.run_params["duration"] = f"{mm:02d}:{ss:02d} (mm:ss)"
+        if hasattr(self, "report_button"):
+            self.report_button.configure(state="normal")
         tags = list(results.per_contrast.keys())
         self.volcano_contrast_combo["values"] = tags
         if tags:
@@ -2122,12 +2166,12 @@ class DEAApp(ttk.Frame):
         if hasattr(self, "direction_label_var"):
             if res.group_high and res.group_low:
                 self.direction_label_var.set(
-                    f"log2FC positivo = più espresso in \"{res.group_high}\"   |   "
-                    f"log2FC negativo = più espresso in \"{res.group_low}\""
+                    f"Positive log2FC = higher expression in \"{res.group_high}\"   |   "
+                    f"Negative log2FC = higher expression in \"{res.group_low}\""
                 )
             else:
                 self.direction_label_var.set(
-                    "Direzione del log2FC non determinabile automaticamente per questo contrasto."
+                    "log2FC direction cannot be determined automatically for this contrast."
                 )
         df = engine.categorize_volcano(res.res_tbl, self.padj_cutoff.get(), self.lfc_cutoff.get())
         df = df.dropna(subset=["padj"]).copy()
@@ -2205,21 +2249,19 @@ class DEAApp(ttk.Frame):
             ranked = ranked[ranked["GeneID"].astype(str).str.lower().str.contains(filt)]
 
         reg_filter = self.table_regulation_filter.get()
-        if reg_filter == "Upregulated only" and "Regolazione" in ranked.columns:
-            ranked = ranked[ranked["Regolazione"].astype(str).str.contains("Up", case=False, na=False)]
-        elif reg_filter == "Downregulated only" and "Regolazione" in ranked.columns:
-            ranked = ranked[ranked["Regolazione"].astype(str).str.contains("Down", case=False, na=False)]
-        elif reg_filter == "Not Significant only" and "Significativo" in ranked.columns:
-            ranked = ranked[~ranked["Significativo"].astype(str).str.contains("Sì|Si|Yes|True", case=False, na=False)]
+        if reg_filter == "Upregulated only" and "Regulation" in ranked.columns:
+            ranked = ranked[ranked["Regulation"].astype(str).str.contains("Up", case=False, na=False)]
+        elif reg_filter == "Downregulated only" and "Regulation" in ranked.columns:
+            ranked = ranked[ranked["Regulation"].astype(str).str.contains("Down", case=False, na=False)]
+        elif reg_filter == "Not Significant only" and "Significant" in ranked.columns:
+            ranked = ranked[~ranked["Significant"].astype(str).str.contains("Yes|True", case=False, na=False)]
 
         for _, r in ranked.iterrows():
-            reg_text = str(r.get("Regolazione", "")).lower()
-            sig_text = str(r.get("Significativo", ""))
-            if sig_text.strip().upper() == "SI":   
-                sig_text = "YES"
+            reg_text = str(r.get("Regulation", "")).lower()
+            sig_text = str(r.get("Significant", ""))
             row_tag = "up" if "up" in reg_text else ("down" if "down" in reg_text else "ns")
             self.gene_tree.insert("", "end", values=(
-                r.get("GeneID", ""), r.get("Regolazione", ""), sig_text,
+                r.get("GeneID", ""), r.get("Regulation", ""), sig_text,
                 round(r.get("log2FoldChange", float("nan")), 3) if pd.notna(r.get("log2FoldChange")) else "",
                 _fmt_sci(r.get("pvalue")), _fmt_sci(r.get("padj")),
                 round(r.get("stat", float("nan")), 3) if pd.notna(r.get("stat")) else "",
@@ -2329,7 +2371,7 @@ class DEAApp(ttk.Frame):
             ora_tbl, top_n=self.top_n_ora.get(), padj_cutoff=cutoff)
         n_in = (res.ora_meta or {}).get("n_input_genes")
         title = self.ora_title_var.get().strip() or f"Top Enriched Pathways (ORA) — {tag.replace('_', ' ')}"
-        dir_colors = {"UP": PALETTE["up"], "DOWN": PALETTE["down"], "MISTO": PALETTE["ns"]}
+        dir_colors = {"UP": PALETTE["up"], "DOWN": PALETTE["down"], "MIXED": PALETTE["ns"]}
 
         if self.ora_chart_type.get() == "Dot":
             from matplotlib.colors import LinearSegmentedColormap
@@ -2343,7 +2385,7 @@ class DEAApp(ttk.Frame):
             panel.ax.tick_params(axis="y", labelsize=8)
             panel.ax.set_title(title)
         else:
-            colors = plot_data["Direzione"].map(dir_colors).fillna(PALETTE["ns"])
+            colors = plot_data["Direction"].map(dir_colors).fillna(PALETTE["ns"])
             bars = panel.ax.barh(plot_data["pathway_clean"], plot_data["neglog10"],
                                   color=colors, height=0.7)
             xmax = max(float(plot_data["neglog10"].max()), -np.log10(cutoff))
@@ -2376,7 +2418,7 @@ class DEAApp(ttk.Frame):
                 r.get("pathway_clean", ""), int(r["Count"]),
                 f"{int(r['Count'])}/{int(r['SetSize'])}",
                 round(float(r["FoldEnrichment"]), 2), _fmt_sci(r.get("p.adjust")),
-                "MIXED" if r.get("Direzione", "") == "MISTO" else r.get("Direzione", ""),
+                r.get("Direction", ""),
                 int(r["N_UP"]), int(r["N_DOWN"])))
 
     def _sort_tree(self, tree: ttk.Treeview, col: str, reverse: bool):
@@ -2391,6 +2433,44 @@ class DEAApp(ttk.Frame):
         for index, (_, k) in enumerate(data):
             tree.move(k, "", index)
         tree.heading(col, command=lambda: self._sort_tree(tree, col, not reverse))
+
+    def _export_pdf_report(self):
+        if self.results is None or not self.results.per_contrast:
+            messagebox.showinfo("Info", "Run an analysis first: there are no results to report.")
+            return
+        default = f"DEA_report_{datetime.datetime.now():%Y%m%d_%H%M}.pdf"
+        path = filedialog.asksaveasfilename(
+            title="Save PDF report", defaultextension=".pdf", initialfile=default,
+            filetypes=[("PDF", "*.pdf")])
+        if not path:
+            return
+        results = self.results
+        params = dict(self.run_params or {})
+        log_text = self.log_text.get("1.0", "end")
+        self.report_button.configure(state="disabled")
+        self.status_var.set("Generating PDF report... this may take a few seconds.")
+
+        def task():
+            try:
+                report_pdf.build_report(path, results, params, log_text)
+                self.root.after(0, lambda: self._on_report_done(path, None))
+            except Exception as exc:
+                self.root.after(0, lambda err=exc: self._on_report_done(path, err))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _on_report_done(self, path: str, err: Exception | None):
+        self.report_button.configure(state="normal")
+        if err is not None:
+            self.status_var.set("PDF report failed.")
+            messagebox.showerror("Error", f"Could not create the PDF report:\n{err}")
+            return
+        self.status_var.set(f"PDF report saved to: {path}")
+        if messagebox.askyesno("Report saved", f"Report saved to:\n{path}\n\nOpen it now?"):
+            try:
+                webbrowser.open(Path(path).resolve().as_uri())
+            except Exception:
+                pass
 
     def _export_gene_table(self):
         tag = self.active_tag.get()
@@ -2443,8 +2523,8 @@ def launch():
     root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
     root.title("DEA Explorer")
     try:
-        logo_icona = tk.PhotoImage(file="logo.png")
-        root.iconphoto(False, logo_icona)
+        logo_icon = tk.PhotoImage(file="logo.png")
+        root.iconphoto(False, logo_icon)
     except tk.TclError:
         pass
     root.geometry("1200x860")
