@@ -1,5 +1,3 @@
-#!/bin/bash
-# Crea "DEA Explorer.app" (da eseguire su un Mac, dentro questa cartella):  bash build_mac.sh
 set -e
 cd "$(dirname "$0")"
 
