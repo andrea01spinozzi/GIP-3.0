@@ -1,30 +1,3 @@
-#!/usr/bin/env Rscript
-# =============================================================================
-# run_pipeline.R
-#
-# Ponte non interattivo tra la GUI Python e "DE_scheletro_FINALE.Rmd".
-#
-# IMPORTANTE: questo script NON modifica e NON reimplementa la logica
-# statistica presente in DE_scheletro_FINALE.Rmd. Si limita a:
-#   1) estrarre le definizioni di funzione dai blocchi ```{r} ... ``` di
-#      DE_scheletro_FINALE.Rmd (ignorando il blocco 7, che nel file originale contiene
-#      solo una demo con percorsi di file hardcoded su Windows);
-#   2) chiamare quelle stesse funzioni (import_expression, import_metadata,
-#      run_differential_expression, plot_universal_pca, plot_universal_volcano,
-#      generate_ranked_gene_table, run_ora_analysis, run_gsea_analysis, ecc.)
-#      con i parametri scelti dall'utente nella GUI;
-#   3) salvare su disco i DATI GREZZI sottostanti ai grafici (tramite
-#      l'oggetto ggplot restituito, es. p$data) invece dei grafici già
-#      renderizzati, cosi' che Python possa ridisegnarli in modo interattivo
-#      (zoom, hover, legende dinamiche) senza mai ricalcolare la statistica.
-#
-# Uso:
-#   Rscript run_pipeline.R <percorso_config.json>
-#
-# Il file di config e' un JSON con i campi descritti in core_calcolo.py
-# (funzione build_config).
-# =============================================================================
-
 suppressWarnings(suppressMessages({
   ok_jsonlite <- requireNamespace("jsonlite", quietly = TRUE)
 }))
@@ -35,7 +8,6 @@ library(jsonlite)
 
 `%||%` <- function(a, b) if (is.null(a) || (length(a) == 1 && is.na(a))) b else a
 
-# --- Utility: individua la cartella in cui si trova questo script -----------
 .script_dir <- function() {
   cmd_args <- commandArgs(trailingOnly = FALSE)
   file_flag <- "--file="
@@ -46,8 +18,7 @@ library(jsonlite)
   return(getwd())
 }
 
-# --- Estrae SOLO le funzioni (blocchi 1-6) da DE_scheletro_FINALE.Rmd, ignorando -----
-# --- il blocco 7 (demo con percorsi hardcoded), senza toccare il file --------
+
 .load_core_functions <- function(core_path) {
   if (!file.exists(core_path)) {
     stop("File DE_scheletro_FINALE.Rmd not found at: ", core_path)
@@ -61,8 +32,6 @@ library(jsonlite)
   for (ln in raw_lines) {
     trimmed <- trimws(ln)
 
-    # Il blocco 7 ("SIMULAZIONE E TEST COMPLETO") contiene solo una demo con
-    # percorsi hardcoded: da qui in poi non estraiamo piu' nulla.
     if (grepl("^#\\s*7\\.", trimmed)) {
       stop_extraction <- TRUE
     }
@@ -82,7 +51,6 @@ library(jsonlite)
   source(tmp_core, echo = FALSE)
 }
 
-# --- Scrive un errore in formato JSON e termina con status != 0 -------------
 .fail <- function(out_dir, msg) {
   err_path <- file.path(out_dir, "error.json")
   write(toJSON(list(error = msg), auto_unbox = TRUE), err_path)
@@ -90,9 +58,7 @@ library(jsonlite)
   quit(status = 1)
 }
 
-# =============================================================================
-# MAIN
-# =============================================================================
+
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1) {
   stop("Usage: Rscript run_pipeline.R <config.json>")
@@ -113,11 +79,7 @@ tryCatch({
     .load_core_functions(core_path)
   }))
 
-  # ---------------------------------------------------------------------
-  # MODALITA' 1: list_groups
-  # Legge solo il metadata ed estrae i gruppi disponibili, cosi' la GUI
-  # puo' farli scegliere all'utente PRIMA di lanciare l'intera pipeline.
-  # ---------------------------------------------------------------------
+
   if (cfg$mode == "list_groups") {
 
     metadata <- import_metadata(cfg$metadata_path,
@@ -136,11 +98,6 @@ tryCatch({
           file.path(out_dir, "groups.json"))
     cat("OK\n")
 
-  # ---------------------------------------------------------------------
-  # MODALITA' 2: run_dea
-  # Esegue la pipeline completa (import -> DEA -> tabella -> GSEA),
-  # riusando ESATTAMENTE le funzioni di DE_scheletro_FINALE.Rmd.
-  # ---------------------------------------------------------------------
   } else if (cfg$mode == "run_dea") {
 
     is_micro <- identical(cfg$method, "Microarray")
@@ -152,10 +109,7 @@ tryCatch({
                                  sample_col = cfg$sample_col,
                                  condition_col = cfg$condition_col)
 
-    # --- PCA esplorativa: riusiamo plot_universal_pca cosi' com'e' e ne
-    # estraiamo solo i dati sottostanti (p$data) e le etichette degli assi
-    # (che contengono la percentuale di varianza spiegata) per poterla
-    # ridisegnare in modo interattivo in Python.
+
     p_pca <- plot_universal_pca(counts, metadata, title = "PCA dei Dati di Conteggio")
     write.csv(p_pca$data, file.path(out_dir, "pca_data.csv"), row.names = FALSE)
     write(toJSON(list(x_label = p_pca$labels$x, y_label = p_pca$labels$y),
@@ -180,11 +134,6 @@ tryCatch({
       write.csv(ranked, file.path(out_dir, paste0("ranked_", tag, ".csv")),
                 row.names = FALSE)
 
-      # --- ORA (Over-Representation Analysis) ---
-      # Stessi cutoff (padj / log2FC) e stessa categoria MSigDB della GSEA.
-      # run_ora_analysis() restituisce NULL (con un warning) se i geni sono troppo
-      # pochi o nessun pathway e' testabile: in quel caso salviamo solo il meta
-      # con la motivazione, cosi' la GUI puo' mostrarla.
       if (run_ora) {
         ora_note <- NULL
         ora_res <- tryCatch({
@@ -227,7 +176,6 @@ tryCatch({
       })
       if (gsea_ok && !is.null(gsea_res)) {
         gsea_out <- as.data.frame(gsea_res)
-        # leadingEdge e' una list-column: la trasformiamo in stringa per il CSV
         if ("leadingEdge" %in% colnames(gsea_out)) {
           gsea_out$leadingEdge <- vapply(gsea_out$leadingEdge,
                                           function(x) paste(x, collapse = ";"),
