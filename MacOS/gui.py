@@ -32,17 +32,14 @@ except ImportError:
 import core_calcolo as engine
 
 
-# =============================================================================
-# Visual theme (palette, fonts, ttk style)
-# =============================================================================
 PALETTE = {
-    "bg": "#f4f8fc",            # general background, very light blue-gray
-    "bg_card": "#ffffff",       # panel/box background (crisp white cards)
-    "accent": "#123c63",        # main academic blue (deeper, more premium)
+    "bg": "#f4f8fc",         
+    "bg_card": "#ffffff",     
+    "accent": "#123c63",   
     "accent_light": "#2f74ad",
     "accent_pale": "#d7e6f2",
     "accent_pale_2": "#eaf1f8",
-    "accent_soft": "#5b9bd5",   # secondary accent used for hover/highlights
+    "accent_soft": "#5b9bd5", 
     "text": "#1b2b3a",
     "muted": "#8a97a3",
     "border": "#d7e3ee",
@@ -56,8 +53,6 @@ PALETTE = {
     "drop_active": "#eaf6ee",
 }
 
-# Color-blind-friendly palette (Okabe & Ito, 2008) — useful for publication
-# figures that are also readable by people with color vision deficiencies.
 OKABE_ITO = ["#E69F00", "#56B4E9", "#009E73", "#F0E442",
              "#0072B2", "#D55E00", "#CC79A7", "#000000"]
 
@@ -71,8 +66,6 @@ FONT_MONO = ("Menlo", 10) if IS_MAC else ("Consolas", 9)
 FONT_EMOJI = "Apple Color Emoji" if IS_MAC else "Segoe UI Emoji"
 
 class ColorSwatch(tk.Label):
-    """Quadratino colorato cliccabile (tk.Button su macOS ignora il colore di sfondo)."""
-
     def __init__(self, master, command=None, **kw):
         kw.pop("bd", None)
         kw.setdefault("cursor", "hand2")
@@ -85,7 +78,6 @@ class ColorSwatch(tk.Label):
 LEGEND_POSITIONS = ["best", "upper right", "upper left", "lower left", "lower right",
                      "center left", "center right", "upper center", "lower center", "outside"]
 
-# Figure size presets for scientific journals (width, height) in inches.
 EXPORT_PRESETS = {
     "Custom": None,
     "Single column (89 mm)": (89 / 25.4, 89 / 25.4 * 0.75),
@@ -433,8 +425,6 @@ if sys.platform == "win32":
         pass
 
 def apply_theme(root: tk.Tk) -> ttk.Style:
-    """Configure a consistent ttk theme (academic palette, clean borders,
-    colored tabs, readable tables, validation styles)."""
     style = ttk.Style(root)
     try:
         style.theme_use("clam")
@@ -519,14 +509,7 @@ def apply_theme(root: tk.Tk) -> ttk.Style:
 
     return style
 
-
-# =============================================================================
-# Tooltip: small contextual help that pops up on hover
-# =============================================================================
 class Tooltip:
-    """Shows a small text box when the mouse hovers over a widget for a
-    moment. Used throughout the GUI to explain what a field does, without
-    cluttering the interface with fixed text."""
 
     def __init__(self, widget, text: str, delay: int = 500, wraplength: int = 280):
         self.widget = widget
@@ -572,22 +555,10 @@ class Tooltip:
 
 
 def add_tip(widget, text: str):
-    """Shortcut: attaches a Tooltip to a widget and returns it (useful for
-    chaining calls while building the UI)."""
     Tooltip(widget, text)
     return widget
 
-
-# =============================================================================
-# DropZone: a card-style control that lets the user either drag a file
-# in from the OS file explorer, or click anywhere on the card to open the
-# usual "Browse..." dialog. Falls back cleanly to click-only selection if
-# tkinterdnd2 is not installed (HAS_DND == False).
-# =============================================================================
 class DropZone(tk.Frame):
-    """A single-file picker presented as a rounded-looking card. Reflects
-    three states visually: empty, file selected & found, path set but
-    file missing on disk."""
 
     def __init__(self, parent, title: str, subtitle: str, path_var: tk.StringVar,
                  pick_command, icon: str = "📄", accepted_ext=None):
@@ -685,12 +656,6 @@ class DropZone(tk.Frame):
             self.icon_lbl.configure(fg=PALETTE["err"])
             self.configure(highlightbackground=PALETTE["err"])
 
-
-# =============================================================================
-# ScrollableFrame: container with a vertical scrollbar always on the RIGHT.
-# Used to wrap the content of EVERY tab in the program, so that no control
-# is ever cut off by the window edge.
-# =============================================================================
 class ScrollableFrame(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
@@ -699,7 +664,6 @@ class ScrollableFrame(ttk.Frame):
         self.inner = ttk.Frame(self.canvas)
 
         self.canvas.configure(yscrollcommand=self.vbar.set)
-        # The scrollbar always stays on the right, the canvas takes the rest.
         self.vbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -707,9 +671,7 @@ class ScrollableFrame(ttk.Frame):
 
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
-        # Mouse wheel scrolling only works while the mouse is over THIS tab:
-        # it binds/unbinds bind_all on every Enter/Leave, so the other
-        # (hidden) tabs don't intercept the event.
+
         self.canvas.bind("<Enter>", self._bind_wheel)
         self.canvas.bind("<Leave>", self._unbind_wheel)
 
@@ -737,10 +699,6 @@ class ScrollableFrame(ttk.Frame):
 
 
 def confidence_ellipse(x, y, ax, n_std=1.5, **kwargs):
-    """Draws a confidence ellipse (approximated at n_std standard
-    deviations) around the centroid of the points (x, y). Standard
-    technique for highlighting sample clustering in a PCA chart, widely
-    used in publication figures. Requires at least 3 points."""
     if len(x) < 3:
         return None
     cov = np.cov(x, y)
@@ -763,20 +721,7 @@ def confidence_ellipse(x, y, ax, n_std=1.5, **kwargs):
     ellipse.set_transform(transf + ax.transData)
     return ax.add_patch(ellipse)
 
-
-# =============================================================================
-# Reusable widget: interactive "publication-ready" chart
-#   - zoom/pan via the standard matplotlib toolbar
-#   - hover on points (if mplcursors is available)
-#   - common style controls: grid, legend + position, minimalist axes,
-#     serif/sans font, panel label (e.g. "A")
-#   - manual annotations: arrow / line / box / text, drawn with the mouse
-#   - high-resolution export with journal format presets
-# =============================================================================
 class InteractivePlotPanel(ttk.Frame):
-    """A panel with an embedded matplotlib chart, a style bar, an
-    annotation bar to fine-tune the figure by hand, and a text box
-    explaining how to read the chart."""
 
     def __init__(self, parent, explanation: str, figsize=(6.4, 5.0), redraw_callback=None):
         super().__init__(parent)
@@ -792,9 +737,9 @@ class InteractivePlotPanel(ttk.Frame):
         toolbar_frame.pack(side=tk.TOP, fill=tk.X)
         self.toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame, pack_toolbar=False)
         self.toolbar.update()
-        bg_color = PALETTE["accent_pale_2"]  # Same light color as the box at the bottom
-        button_bg = "#cae2f9"                # Button background
-        toolbar_frame.config(style="TFrame") # Make sure the standard ttk style is used
+        bg_color = PALETTE["accent_pale_2"]  
+        button_bg = "#cae2f9"              
+        toolbar_frame.config(style="TFrame")
         self.toolbar.config(background=bg_color)
         if hasattr(self.toolbar, '_message_label'):
             self.toolbar._message_label.config(
@@ -807,10 +752,10 @@ class InteractivePlotPanel(ttk.Frame):
             if isinstance(child, tk.Button):
                 child.config(
                     background=button_bg,
-                    activebackground="#e4e6eb",  # Slightly darker color on mouse hover
-                    relief="flat",               # Removes the raised 3D border
+                    activebackground="#e4e6eb", 
+                    relief="flat",  
                     borderwidth=1,
-                    highlightthickness=0,        # Removes the extra focus border
+                    highlightthickness=0, 
                     padx=6,
                     pady=4
                 )
@@ -822,7 +767,6 @@ class InteractivePlotPanel(ttk.Frame):
 
         self.toolbar.pack(side=tk.TOP, fill=tk.X)
 
-        # --- "publication-ready" style controls state ---
         self.grid_on = tk.BooleanVar(value=True)
         self.minimal_spines = tk.BooleanVar(value=True)
         self.legend_on = tk.BooleanVar(value=True)
@@ -833,8 +777,7 @@ class InteractivePlotPanel(ttk.Frame):
 
         self._build_style_toolbar()
 
-        # --- manual annotations state ---
-        self.annotation_mode = tk.StringVar(value="none")   # none|arrow|line|rect|text
+        self.annotation_mode = tk.StringVar(value="none")  
         self.annotation_color = "#2c3e50"
         self.annotation_lw = tk.DoubleVar(value=1.5)
         self.custom_artists: list = []
@@ -852,7 +795,6 @@ class InteractivePlotPanel(ttk.Frame):
         self.canvas.mpl_connect("button_press_event", self._on_press)
         self.canvas.mpl_connect("button_release_event", self._on_release)
 
-    # ------------------------------------------------------------------
     def _build_style_toolbar(self):
         bar = ttk.Frame(self)
         bar.pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
@@ -902,9 +844,6 @@ class InteractivePlotPanel(ttk.Frame):
                     command=self.redraw_callback).pack(side=tk.LEFT, padx=2)
 
     def apply_common_style(self):
-        """Applies grid/minimalist axes/font/panel label. Must be called
-        inside every drawing function, after plotting the data but before
-        panel.redraw()."""
         ax = self.ax
         ax.grid(self.grid_on.get(), alpha=0.25)
         show_side_spines = not self.minimal_spines.get()
@@ -932,9 +871,6 @@ class InteractivePlotPanel(ttk.Frame):
                      va="bottom", ha="left")
 
     def place_legend(self, **kwargs):
-        """Shows/hides/positions the legend according to the style
-        controls. Call this instead of ax.legend(...) directly in drawing
-        functions, to respect the user's choice."""
         if not self.legend_on.get():
             leg = self.ax.get_legend()
             if leg:
@@ -947,7 +883,6 @@ class InteractivePlotPanel(ttk.Frame):
         else:
             self.ax.legend(loc=pos, frameon=False, **kwargs)
 
-    # ------------------------------------------------------------------
     def _build_annotation_toolbar(self):
         bar = ttk.Frame(self)
         bar.pack(side=tk.TOP, fill=tk.X, pady=(2, 0))
@@ -984,7 +919,6 @@ class InteractivePlotPanel(ttk.Frame):
         add_tip(btn_export, "Saves this chart in high resolution, with journal format "
                              "presets, ready to use directly in a paper or poster.")
 
-    # ------------------------------------------------------------------
     def clear(self):
         self.ax.clear()
         self.custom_artists = []
@@ -995,8 +929,6 @@ class InteractivePlotPanel(ttk.Frame):
         self.canvas.draw_idle()
 
     def enable_hover(self, artist, formatter):
-        """Adds a hover tooltip on points, if mplcursors is available.
-        formatter(index) -> string to display."""
         if not HAS_MPLCURSORS:
             return
         cursor = mplcursors.cursor(artist, hover=True)
@@ -1006,9 +938,6 @@ class InteractivePlotPanel(ttk.Frame):
             sel.annotation.set_text(formatter(sel.index))
             sel.annotation.get_bbox_patch().set(fc="lightyellow", alpha=0.95)
 
-    # ------------------------------------------------------------------
-    # Manual annotations (arrows, lines, boxes, text) drawn with the mouse
-    # ------------------------------------------------------------------
     def _pick_color(self):
         color = colorchooser.askcolor(color=self.annotation_color,
                                        title="Annotation color")[1]
@@ -1020,7 +949,6 @@ class InteractivePlotPanel(ttk.Frame):
         if event.inaxes != self.ax or self.annotation_mode.get() == "none":
             return
         if getattr(self.toolbar, "mode", ""):
-            # the zoom/pan toolbar is active: don't draw annotations
             return
         if self.annotation_mode.get() == "text":
             self._add_text_annotation(event.xdata, event.ydata)
@@ -1091,9 +1019,6 @@ class InteractivePlotPanel(ttk.Frame):
         self.custom_artists = []
         self.redraw()
 
-    # ------------------------------------------------------------------
-    # High-resolution export, with journal format presets
-    # ------------------------------------------------------------------
     def _open_export_dialog(self):
         dlg = tk.Toplevel(self)
         dlg.title("Export image")
@@ -1197,9 +1122,6 @@ class InteractivePlotPanel(ttk.Frame):
         ttk.Button(btns, text="Save...", style="Accent.TButton", command=do_export).pack(side=tk.RIGHT, padx=4)
 
 
-# =============================================================================
-# Main application
-# =============================================================================
 class DEAApp(ttk.Frame):
 
     LABEL_MODE_DISPLAY = [
@@ -1298,8 +1220,6 @@ class DEAApp(ttk.Frame):
 
     # ------------------------------------------------------------------
     def _show_help(self, tab_key: str):
-        """Opens a window showing the explanation and usage instructions
-        for the given tab (from HELP_CONTENT)."""
         content = HELP_CONTENT.get(tab_key)
         if not content:
             return
@@ -1335,15 +1255,11 @@ class DEAApp(ttk.Frame):
         ttk.Button(btns, text="Close", style="Accent.TButton", command=dlg.destroy).pack(side=tk.RIGHT)
 
     def _build_help_button(self, parent, tab_key: str) -> ttk.Button:
-        """Creates a '? Help' button that opens the help window for the
-        given tab, ready to be packed/gridded wherever needed in the
-        caller's layout."""
         btn = ttk.Button(parent, text="? Help", style="Help.TButton",
                          command=lambda: self._show_help(tab_key))
         add_tip(btn, "Opens the explanation of what this tab shows and how to use its controls.")
         return btn
 
-    # ------------------------------------------------------------------
     def _build_layout(self):
         self._build_header()
 
@@ -1366,8 +1282,6 @@ class DEAApp(ttk.Frame):
         self.notebook.add(self.tab_ora, text="6 · ORA / Over-representation")
         self.notebook.add(self.tab_log, text="Log")
 
-        # Every tab is wrapped in a ScrollableFrame: the scrollbar is
-        # always on the right, in ALL tabs.
         self._build_setup_tab(self._make_scrollable(self.tab_setup))
         self._build_pca_tab(self._make_scrollable(self.tab_pca))
         self._build_volcano_tab(self._make_scrollable(self.tab_volcano))
@@ -1376,7 +1290,6 @@ class DEAApp(ttk.Frame):
         self._build_ora_tab(self._make_scrollable(self.tab_ora))
         self._build_log_tab(self._make_scrollable(self.tab_log))
 
-        # Status bar
         status_frame = tk.Frame(self, bg=PALETTE["accent_pale_2"])
         status_frame.pack(side=tk.BOTTOM, fill=tk.X)
         self.status_var = tk.StringVar(value="Ready.")
@@ -1385,9 +1298,6 @@ class DEAApp(ttk.Frame):
                   font=FONT_SMALL, padding=(10, 5)).pack(fill=tk.X)
 
     def _make_scrollable(self, tab: ttk.Frame) -> ttk.Frame:
-        """Wraps a tab's content in a ScrollableFrame (vertical scrollbar
-        on the right) and returns the inner frame in which to build the
-        controls."""
         sf = ScrollableFrame(tab)
         sf.pack(fill=tk.BOTH, expand=True)
         return sf.inner
@@ -1406,7 +1316,7 @@ class DEAApp(ttk.Frame):
 
         if logo_piccolo is not None:
             logo_header = tk.Label(inner, image=logo_piccolo, bg=PALETTE["accent"])
-            logo_header.image = logo_piccolo  # Keeps Python from garbage-collecting the image
+            logo_header.image = logo_piccolo 
             logo_header.pack(side=tk.RIGHT, padx=15, pady=5)
 
         title_row = tk.Frame(inner, bg=PALETTE["accent"])
@@ -1424,16 +1334,13 @@ class DEAApp(ttk.Frame):
         accent_line = tk.Frame(self, bg=PALETTE["accent_soft"], height=3)
         accent_line.pack(side=tk.TOP, fill=tk.X)
 
-    # ------------------------------------------------------------------
     def _build_setup_tab(self, f):
         pad = {"padx": 8, "pady": 6}
 
-        # --- Header row with the Help button ---
         top_bar = ttk.Frame(f)
         top_bar.pack(fill=tk.X, padx=10, pady=(10, 0))
         self._build_help_button(top_bar, "setup").pack(anchor="center", pady=(10, 5))
 
-        # --- Preparation status: quick checklist of what's missing ---
         status_frame = ttk.LabelFrame(f, text="Preparation status")
         status_frame.pack(fill=tk.X, padx=10, pady=(10, 8))
         self.chk_counts_lbl = ttk.Label(status_frame, text="○ Counts file not selected",
@@ -1446,7 +1353,6 @@ class DEAApp(ttk.Frame):
                                          style="CardMuted.TLabel")
         self.chk_groups_lbl.grid(row=2, column=0, sticky="w", padx=10, pady=3)
 
-        # --- File input: drag-and-drop cards + column mapping ---
         file_frame = ttk.LabelFrame(f, text="Input files")
         file_frame.pack(fill=tk.X, padx=10, pady=8)
 
@@ -1473,8 +1379,6 @@ class DEAApp(ttk.Frame):
                            "be able to drag files directly into the boxes above.",
                       style="Muted.TLabel", wraplength=800).pack(fill=tk.X, padx=12, pady=(2, 8))
 
-        # Hidden entries kept for backward-compatible validation styling
-        # (the visible file selection now happens via the DropZone cards).
         self.counts_entry = None
         self.metadata_entry = None
 
@@ -1505,7 +1409,6 @@ class DEAApp(ttk.Frame):
         reset_btn.grid(row=0, column=2, rowspan=3, padx=(30, 8), pady=6, sticky="ns")
         add_tip(reset_btn, "Clears all the fields in this section so you can start over.")
 
-        # --- Statistical method ---
         method_frame = ttk.LabelFrame(f, text="Statistical method (chosen by the user)")
         method_frame.pack(fill=tk.X, padx=10, pady=8)
         rb1 = ttk.Radiobutton(method_frame, text="RNA-seq -> DESeq2 (Wald test)",
@@ -1519,7 +1422,6 @@ class DEAApp(ttk.Frame):
         add_tip(rb2, "Choose this option if your data are microarray intensity values "
                      "(typically already log-transformed). The analysis will use limma.")
 
-        # --- Groups ---
         group_frame = ttk.LabelFrame(f, text="Groups to compare")
         group_frame.pack(fill=tk.X, padx=10, pady=8)
         extract_btn = ttk.Button(group_frame, text="Extract groups from metadata",
@@ -1535,39 +1437,30 @@ class DEAApp(ttk.Frame):
         add_tip(pairwise_cb, "If enabled, automatically analyzes every possible pair of "
                               "groups instead of one specific two-group comparison.")
 
-        # --- Analysis parameters ---
         param_frame = ttk.LabelFrame(f, text="Analysis parameters (customizable)")
         param_frame.pack(fill=tk.X, padx=10, pady=8)
-# --- MINIMUM COUNTS SLIDER ---
 
         row_idx = 3  
 
-        # Descriptive label (column 0)
         counts_lbl = ttk.Label(param_frame, text="Minimum counts filter:")
         counts_lbl.grid(row=row_idx, column=0, sticky="w", padx=5, pady=6)
         add_tip(counts_lbl, "Removes genes whose total read/count sum across all samples does not "
                             "reach this value, improving the statistical power of the test.")
 
-        # Inner sub-frame (column 1)
         slider_subframe = ttk.Frame(param_frame)
         slider_subframe.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=6)
 
-        # Dynamic numeric label (right-aligned in the sub-frame)
         val_lbl = ttk.Label(slider_subframe, text=f"{self.min_counts_var.get()}", font=FONT_BOLD, width=4, anchor="e")
         val_lbl.pack(side="right", padx=(5, 0))
 
-        # Runs AUTOMATICALLY every time self.min_counts_var changes
         def _update_label_on_write(*args):
             try:
                 val_lbl.configure(text=str(self.min_counts_var.get()))
             except Exception:
                 pass
 
-        # Hook the variable to the auto-update function
         self.min_counts_var.trace_add("write", _update_label_on_write)
 
-        # The slider itself
-        # Note: no 'command' parameter, to avoid conflicts with the variable trace
         counts_slider = ttk.Scale(
             slider_subframe, 
             from_=0, 
@@ -1618,7 +1511,6 @@ class DEAApp(ttk.Frame):
         add_tip(ora_dir_combo, "Which significant genes are tested: all DEGs (up + down together), "
                                 "only the up-regulated or only the down-regulated ones.")
 
-        # --- Execution ---
         run_frame = ttk.Frame(f)
         run_frame.pack(fill=tk.X, padx=10, pady=10)
         self.run_button = ttk.Button(run_frame, text="Run analysis", style="Accent.TButton",
@@ -1634,7 +1526,6 @@ class DEAApp(ttk.Frame):
                 "comparison), set the parameters and press 'Run analysis'.")
         ttk.Label(f, text=info, wraplength=800, style="Muted.TLabel").pack(fill=tk.X, padx=14, pady=(2, 12))
 
-        # Live validation of required fields
         self.counts_path.trace_add("write", lambda *a: self._validate_setup())
         self.metadata_path.trace_add("write", lambda *a: self._validate_setup())
 
@@ -1679,7 +1570,6 @@ class DEAApp(ttk.Frame):
         for child in self.groups_container.winfo_children():
             child.configure(state=state)
 
-    # ------------------------------------------------------------------
     def _build_pca_tab(self, f):
         top_bar = ttk.Frame(f)
         top_bar.pack(fill=tk.X, padx=8, pady=(8, 0))
@@ -1747,7 +1637,6 @@ class DEAApp(ttk.Frame):
         controls.columnconfigure(0, weight=1)
         controls.columnconfigure(1, weight=1)
 
-        # --- Gene labels ---
         label_frame = ttk.LabelFrame(controls, text="Gene labels (for publication)")
         label_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=4)
 
@@ -1778,7 +1667,6 @@ class DEAApp(ttk.Frame):
         add_tip(leader_cb, "Draws a thin line connecting the point to the label, useful "
                             "when there are many labels close together.")
 
-        # --- Appearance ---
         style_frame = ttk.LabelFrame(controls, text="Chart appearance")
         style_frame.grid(row=0, column=1, sticky="nsew", pady=4)
 
@@ -1998,7 +1886,6 @@ class DEAApp(ttk.Frame):
                 fh.write(self.log_text.get("1.0", "end"))
             self.status_var.set(f"Log saved to: {path}")
 
-    # ------------------------------------------------------------------
     def _log(self, msg: str):
         self.log_text.configure(state="normal")
         self.log_text.insert("end", msg + "\n")
@@ -2019,7 +1906,6 @@ class DEAApp(ttk.Frame):
         if path:
             self.metadata_path.set(path)
 
-    # ------------------------------------------------------------------
     def _extract_groups(self):
         if not self.metadata_path.get():
             messagebox.showerror("Error", "Please select the metadata file first.")
@@ -2079,7 +1965,6 @@ class DEAApp(ttk.Frame):
             return int(value)
         return value
 
-    # ------------------------------------------------------------------
     def _run_analysis(self):
         if not self.counts_path.get() or not self.metadata_path.get():
             messagebox.showerror("Error", "Please select both the counts file and the metadata file.")
@@ -2097,7 +1982,6 @@ class DEAApp(ttk.Frame):
                 return
             contrast = selected
 
-        # Lettura delle variabili Tk nel thread principale (il task gira in un thread a parte)
         run_ora = self.run_ora.get()
         ora_direction = self.ORA_DIRECTION_MAP.get(self.ora_direction_display.get(), "all")
 
@@ -2161,7 +2045,6 @@ class DEAApp(ttk.Frame):
         self._refresh_all_views()
         self.notebook.select(self.tab_pca)
 
-    # ------------------------------------------------------------------
     def _refresh_all_views(self):
         if self.results is None:
             return
@@ -2347,7 +2230,7 @@ class DEAApp(ttk.Frame):
         for _, r in ranked.iterrows():
             reg_text = str(r.get("Regolazione", "")).lower()
             sig_text = str(r.get("Significativo", ""))
-            if sig_text.strip().upper() == "SI":   # R writes SI/NO/NA: show it in English
+            if sig_text.strip().upper() == "SI":   
                 sig_text = "YES"
             row_tag = "up" if "up" in reg_text else ("down" if "down" in reg_text else "ns")
             self.gene_tree.insert("", "end", values=(
@@ -2428,7 +2311,6 @@ class DEAApp(ttk.Frame):
         if self.results is None:
             return
         panel = self.ora_panel
-        # la colorbar del dot plot vive in un asse a parte: va rimossa prima di ax.clear()
         if self._ora_colorbar is not None:
             try:
                 self._ora_colorbar.remove()
@@ -2512,7 +2394,6 @@ class DEAApp(ttk.Frame):
                 "MIXED" if r.get("Direzione", "") == "MISTO" else r.get("Direzione", ""),
                 int(r["N_UP"]), int(r["N_DOWN"])))
 
-    # ------------------------------------------------------------------
     def _sort_tree(self, tree: ttk.Treeview, col: str, reverse: bool):
         data = [(tree.set(k, col), k) for k in tree.get_children("")]
 
@@ -2566,7 +2447,6 @@ class DEAApp(ttk.Frame):
             self.status_var.set(f"ORA table exported to: {path}")
 
 
-# --- small local helpers ---
 def _fmt_sci(value) -> str:
     if value is None or pd.isna(value):
         return ""
