@@ -1,22 +1,21 @@
 import sys
 import traceback
 
-
 def main():
     try:
         import core_calcolo as engine
     except Exception as e:
-        print("Errore critico: impossibile importare core_calcolo.py:", e)
+        print("Critical error: unable to import core_calcolo.py:", e)
         traceback.print_exc()
         sys.exit(1)
 
     problems = engine.check_environment()
     if problems:
-        print("Attenzione, sono stati rilevati i seguenti problemi di ambiente:")
+        print("Attention, the following environmental issues have been detected:")
         for p in problems:
             print(" - " + p)
-        print("L'app si avviera' comunque: potrai correggere l'ambiente e riprovare dalla GUI.\n")
-        if getattr(sys, "frozen", False):   # app .app senza terminale: mostra una finestra
+        print("The app will launch anyway; you can correct the environment and try again from the GUI.\n")
+        if getattr(sys, "frozen", False):   
             try:
                 import tkinter as tk
                 from tkinter import messagebox
@@ -29,10 +28,10 @@ def main():
     try:
         import gui
     except Exception as e:
-        print("Errore critico: impossibile importare gui.py:", e)
-        print("Verifica che tkinter, matplotlib e pandas siano installati "
-              "(pip install matplotlib pandas; tkinter e' incluso in Python standard "
-              "su Windows/macOS, su Linux potrebbe servire 'sudo apt install python3-tk').")
+        print("Critical error: could not import gui.py:", e)
+        print("Verify that tkinter, matplotlib, and pandas are installed "
+              "(pip install matplotlib pandas; tkinter is included in standard Python "
+              "on Windows/macOS).")
         traceback.print_exc()
         sys.exit(1)
 
