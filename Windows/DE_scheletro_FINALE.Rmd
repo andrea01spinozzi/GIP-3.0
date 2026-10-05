@@ -178,7 +178,7 @@ validate_contrast <- function(metadata, contrast) {
   invisible(TRUE)
 }
 
-run_differential_expression <- function(expr_matrix, metadata, method = "RNAseq", contrast = c("treated", "control")) {
+run_differential_expression <- function(expr_matrix, metadata, method = "RNAseq", contrast = c("treated", "control"), min_counts = 10) {
   # Validation of the user-chosen comparison against the real labels in the metadata
   validate_contrast(metadata, contrast)
   
@@ -186,12 +186,20 @@ run_differential_expression <- function(expr_matrix, metadata, method = "RNAseq"
   expr_matrix <- expr_matrix[, samples_intersect]
   metadata <- metadata[samples_intersect, , drop = FALSE]
   
-  metadata$condition <- as.factor(metadata$condition)
+  # Keep ONLY the samples of the 2 selected groups: any other group present in the metadata is excluded from normalization, dispersion estimation / variance modelling and filtering, so it cannot influence the result.
+  keep <- as.character(metadata$condition) %in% contrast
+  expr_matrix <- expr_matrix[, rownames(metadata)[keep], drop = FALSE]
+  metadata <- metadata[keep, , drop = FALSE]
+  metadata$condition <- factor(as.character(metadata$condition), levels = c(contrast[2], contrast[1]))
+  message(">>> Samples used: ", paste(contrast[1], sum(metadata$condition == contrast[1]), sep = "="),
+          ", ", paste(contrast[2], sum(metadata$condition == contrast[2]), sep = "="))
   
   if (method == "RNAseq") {
     message(">>> Running DESeq2 modelling for RNA-seq...")
     dds <- DESeqDataSetFromMatrix(countData = expr_matrix, colData = metadata, design = ~ condition)
-    dds <- dds[rowSums(counts(dds)) >= 10, ] 
+    # Pre-filter: minimum total counts per gene (computed on the 2 selected groups only; default 10).
+    dds <- dds[rowSums(counts(dds)) >= min_counts, ]
+    if (nrow(dds) < 2) stop("Fewer than 2 genes pass the minimum counts filter (", min_counts, "). Lower the threshold.")
     
     dds <- estimateSizeFactors(dds)
     dds <- tryCatch({
