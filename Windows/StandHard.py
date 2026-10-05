@@ -14,10 +14,14 @@ from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 import pandas as pd
 import requests
 
+# --------------------------------------------------------------------------
+#  LOGICA GDC (invariata rispetto alla versione precedente)
+# --------------------------------------------------------------------------
 API = "https://api.gdc.cancer.gov"
 TIMEOUT = 60
 ANY = "(qualsiasi)"
 
+# (etichetta, campo GDC, suggerimento, avanzato?)
 FACETS = [
     ("Progetto", "cases.project.project_id",
      "Lo studio da cui provengono i dati, ad esempio TCGA-BRCA (tumore della mammella).", False),
@@ -81,9 +85,104 @@ def fetch_total(filters):
     return gdc_post("files", {"filters": filters, "size": 0})["pagination"]["total"]
 
 
+# Informazioni cliniche da riportare nel metadata (colonna di output, in ordine).
+# Una colonna viene scritta SOLO se almeno un campione ha un valore; i campioni senza valore
+# ricevono NA_LABEL.
+NA_LABEL = "not available"
+CLINICAL_COLUMNS = [
+    "project_id", "primary_site", "disease_type",
+    "gender", "age_at_index", "age_at_diagnosis_years", "race", "ethnicity", "vital_status",
+    "primary_diagnosis", "ajcc_pathologic_stage", "ajcc_pathologic_m",
+    "treatment_type", "treatment_outcome",
+]
+CLINICAL_FIELDS = [
+    "cases.project.project_id", "cases.primary_site", "cases.disease_type",
+    "cases.demographic.gender", "cases.demographic.age_at_index", "cases.demographic.race",
+    "cases.demographic.ethnicity", "cases.demographic.vital_status",
+    "cases.diagnoses.age_at_diagnosis", "cases.diagnoses.primary_diagnosis",
+    "cases.diagnoses.ajcc_pathologic_stage", "cases.diagnoses.ajcc_pathologic_m",
+    "cases.diagnoses.treatments.treatment_type", "cases.diagnoses.treatments.treatment_outcome",
+]
+# Valori con cui il GDC indica "dato mancante": per noi equivalgono a "non presente".
+_MISSING_MARKERS = {"", "not reported", "unknown", "not allowed to collect", "nan", "none"}
+
+
+def _clean_value(v):
+    """Restituisce il valore come testo pulito, oppure None se mancante."""
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    t = " ".join(str(v).replace("\t", " ").split())
+    return None if t.lower() in _MISSING_MARKERS else t
+
+
+def extract_clinical(case):
+    """Estrae dal 'case' restituito dal GDC le informazioni cliniche principali."""
+    demo = case.get("demographic") or {}
+    diags = case.get("diagnoses") or []
+    diag = diags[0] if diags else {}
+    treatments = [t for d in diags for t in (d.get("treatments") or [])]
+
+    def joined(key):
+        vals = []
+        for t in treatments:
+            v = _clean_value(t.get(key))
+            if v and v not in vals:
+                vals.append(v)
+        return "; ".join(vals) if vals else None
+
+    age_dx = None
+    try:
+        days = diag.get("age_at_diagnosis")
+        if days is not None:
+            age_dx = str(int(round(float(days) / 365.25)))   # il GDC lo fornisce in giorni
+    except (TypeError, ValueError):
+        pass
+
+    project = case.get("project") or {}
+    return {
+        "project_id": _clean_value(project.get("project_id")),
+        "primary_site": _clean_value(case.get("primary_site")),
+        "disease_type": _clean_value(case.get("disease_type")),
+        "gender": _clean_value(demo.get("gender")),
+        "age_at_index": _clean_value(demo.get("age_at_index")),
+        "age_at_diagnosis_years": _clean_value(age_dx),
+        "race": _clean_value(demo.get("race")),
+        "ethnicity": _clean_value(demo.get("ethnicity")),
+        "vital_status": _clean_value(demo.get("vital_status")),
+        "primary_diagnosis": _clean_value(diag.get("primary_diagnosis")),
+        "ajcc_pathologic_stage": _clean_value(diag.get("ajcc_pathologic_stage")),
+        "ajcc_pathologic_m": _clean_value(diag.get("ajcc_pathologic_m")),
+        "treatment_type": joined("treatment_type"),
+        "treatment_outcome": joined("treatment_outcome"),
+    }
+
+
+def add_clinical_columns(meta):
+    """Aggiunge a 'meta' le colonne cliniche: scarta quelle senza alcun valore e scrive
+    NA_LABEL dove il dato manca solo per alcuni campioni."""
+    meta = meta.copy()
+    kept = []
+    for col in CLINICAL_COLUMNS:
+        if col not in meta.columns:
+            continue
+        s = meta[col].map(_clean_value)
+        if s.isna().all():
+            meta = meta.drop(columns=[col])
+            continue
+        meta[col] = s.fillna(NA_LABEL)
+        kept.append(col)
+    return meta, kept
+
+
 def list_files(filters, size):
     fields = ",".join(["file_id", "cases.case_id", "cases.samples.submitter_id",
-                       "cases.samples.sample_type", "associated_entities.entity_submitter_id"])
+                       "cases.samples.sample_type", "associated_entities.entity_submitter_id"]
+                      + CLINICAL_FIELDS)
     data = gdc_post("files", {"filters": filters, "fields": fields, "size": size, "sort": "file_id"})
     rows = []
     for h in data["hits"]:
@@ -92,7 +191,8 @@ def list_files(filters, size):
         samples = case.get("samples") or [{}]
         sample = next((s for s in samples if barcode.startswith(s.get("submitter_id", "\0"))), samples[0])
         rows.append({"file_id": h["file_id"], "case_id": case.get("case_id", ""),
-                     "original_barcode": barcode, "sample_type": sample.get("sample_type", "")})
+                     "original_barcode": barcode, "sample_type": sample.get("sample_type", ""),
+                     **extract_clinical(case)})
     return rows
 
 
@@ -113,6 +213,9 @@ def download_counts(file_id):
     raise RuntimeError(f"{file_id}: {last}")
 
 
+# --------------------------------------------------------------------------
+#  TEMA GRAFICO (viola)
+# --------------------------------------------------------------------------
 PALETTE = {
     "bg": "#f8f5fc",
     "bg_card": "#ffffff",
@@ -199,7 +302,10 @@ HELP_CONTENT = {
             "- counts_matrix_unito.tsv: una riga per gene e una colonna per campione "
             "(S1, S2, ...), con i conteggi grezzi.\n"
             "- metadata_unito.tsv: per ogni campione indica il codice originale, la condizione "
-            "(il nome del gruppo), il paziente, il tipo di campione e il file di origine.\n\n"
+            "(il nome del gruppo), il paziente, il tipo di campione e il file di origine. "
+            "In coda vengono aggiunte le informazioni cliniche disponibili (genere, età, "
+            "stadio, terapia, ecc.): una colonna compare solo se almeno un campione ha il dato, "
+            "e i campioni che non lo hanno riportano 'not available'.\n\n"
             "I due file sono già nel formato accettato da DEA Explorer."
         ),
         "usage": (
@@ -367,6 +473,7 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.bind_all("<Button-5>", self.on_wheel)
 
     def _unbind_wheel(self, _e):
+        # evita di sganciare la rotellina se il mouse è ancora sopra il contenuto
         x, y = self.winfo_pointerxy()
         w = self.winfo_containing(x, y)
         while w is not None:
@@ -386,6 +493,7 @@ class ScrollableFrame(ttk.Frame):
 
 
 class FolderZone(tk.Frame):
+    """Riquadro cliccabile per scegliere la cartella di destinazione."""
 
     def __init__(self, parent, path_var: tk.StringVar, pick_command):
         super().__init__(parent, bg=PALETTE["bg_card"], highlightthickness=2,
@@ -450,6 +558,9 @@ def open_folder(path):
         pass
 
 
+# --------------------------------------------------------------------------
+#  APPLICAZIONE
+# --------------------------------------------------------------------------
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -480,6 +591,7 @@ class App:
         self.refresh()
         self.root.after(100, self.poll)
 
+    # ---------------- costruzione interfaccia ----------------
     def _build(self):
         self._build_header()
 
@@ -536,11 +648,13 @@ class App:
         ttk.Label(bar, text=text, wraplength=820, justify="left").pack(side=tk.LEFT, anchor="w")
         self._help_button(bar, help_key).pack(side=tk.RIGHT, padx=(10, 0))
 
+    # ---- Tab 1
     def _build_filters_tab(self, f):
         self._intro(f, "Descrivi i pazienti che ti interessano con i menu a tendina. "
                        "Il numero tra parentesi quadre indica quanti file esistono per ogni voce.",
                     "filtri")
 
+        # contatore grande
         counter = tk.Frame(f, bg=PALETTE["accent_pale_2"], highlightthickness=1,
                            highlightbackground=PALETTE["border_strong"])
         counter.pack(fill=tk.X, padx=12, pady=8)
@@ -620,6 +734,7 @@ class App:
             self.vars[field], self.boxes[field] = var, cb
 
     def _no_wheel(self, cb):
+        """Impedisce che la rotellina cambi per sbaglio il valore del menu: scorre la pagina."""
         def handler(event):
             return self.sf.on_wheel(event)
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
@@ -681,6 +796,7 @@ class App:
         ttk.Button(nav, text="Avanti ➜", style="Accent.TButton",
                    command=lambda: self.nb.select(self.tab_dl)).pack(side=tk.RIGHT)
 
+    # ---- Tab 3
     def _build_download_tab(self, f):
         self._intro(f, "Scegli dove salvare i file e premi il pulsante: il programma scarica i "
                        "campioni e li unisce in due file pronti per DEA Explorer.", "scarica")
@@ -719,6 +835,7 @@ class App:
         ttk.Button(nav, text="⬅ Indietro", command=lambda: self.nb.select(self.tab_groups)
                    ).pack(side=tk.LEFT)
 
+    # ---------------- aiuto ----------------
     def _show_help(self, key):
         content = HELP_CONTENT[key]
         dlg = tk.Toplevel(self.root)
@@ -749,6 +866,7 @@ class App:
         ttk.Button(btns, text="Chiudi", style="Accent.TButton", command=dlg.destroy
                    ).pack(side=tk.RIGHT)
 
+    # ---------------- filtri collegati al GDC ----------------
     def on_select(self, field):
         label = self.vars[field].get()
         self.sel[field] = None if label == ANY else self.maps[field].get(label)
@@ -851,6 +969,7 @@ class App:
         self.vars[field].set(ANY)
         return True
 
+    # ---------------- gruppi ----------------
     def add_group(self):
         if self.total <= 0:
             messagebox.showwarning("Nessun dato", "Nessun file corrisponde ai filtri correnti.\n"
@@ -914,6 +1033,7 @@ class App:
             self.groups[i]["cond"] = name.strip()
             self._redraw()
 
+    # ---------------- controlli di stato ----------------
     def _update_checks(self):
         if not hasattr(self, "chk_groups"):
             return
@@ -950,6 +1070,7 @@ class App:
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    # ---------------- download ----------------
     def pick_folder(self):
         d = filedialog.askdirectory(title="Cartella di destinazione")
         if d:
@@ -1017,8 +1138,11 @@ class App:
             log("Unisco i dati e salvo i file...")
             meta = pd.DataFrame(ok)
             meta.insert(0, "sample_id", [f"S{i}" for i in range(1, len(ok) + 1)])
+            # Le colonne di base restano nelle stesse posizioni di prima (condition = 3ª colonna);
+            # quelle cliniche vengono aggiunte in coda.
+            meta, clinical_kept = add_clinical_columns(meta)
             meta = meta[["sample_id", "original_barcode", "condition", "case_id",
-                         "sample_type", "file_id"]]
+                         "sample_type", "file_id"] + clinical_kept]
             counts = pd.concat([series[c["file_id"]] for c in ok], axis=1)
             counts.columns = meta["sample_id"].tolist()
             counts.index.name = "gene_id"
@@ -1029,6 +1153,10 @@ class App:
             txt = (f"Salvati in {outdir}:\n"
                    f"- counts_matrix_unito.tsv ({counts.shape[0]} geni × {len(ok)} sample)\n"
                    f"- metadata_unito.tsv")
+            if clinical_kept:
+                txt += f" (con le colonne cliniche: {', '.join(clinical_kept)})"
+            else:
+                txt += " (nessuna informazione clinica disponibile per questi campioni)"
             if errors:
                 txt += f"\n\n{len(errors)} file non scaricati."
             self.q.put(("done", 0, None, txt))
