@@ -24,6 +24,9 @@ LOG_LINES_PER_PAGE = 84
 LOG_MAX_PAGES = 30
 
 
+# --------------------------------------------------------------------------
+# Small helpers
+# --------------------------------------------------------------------------
 def _fmt_sci(v) -> str:
     if v is None or pd.isna(v):
         return ""
@@ -150,6 +153,9 @@ def _note_page_text(fig: Figure, text: str, y: float = 0.5):
     fig.text(0.5, y, text, ha="center", va="center", fontsize=10, color=C["muted"])
 
 
+# --------------------------------------------------------------------------
+# Content pages
+# --------------------------------------------------------------------------
 def _contrast_stats(res, padj_cut: float, lfc_cut: float) -> dict:
     df = engine.categorize_volcano(res.res_tbl, padj_cut, lfc_cut)
     n_up = int((df["status"] == "Upregulated").sum())
@@ -213,6 +219,9 @@ def _page_cover(w: _Writer, results, params: dict, stats: dict, generated: str):
         ("Comparison", comp),
         ("padj cutoff", f"{params.get('padj_cutoff', '?')}"),
         ("|log2FC| cutoff", f"{params.get('lfc_cutoff', '?')}"),
+        ("Genes analyzed", (", ".join(params["gene_list"]) if len(", ".join(params["gene_list"])) <= 90
+                            else f"{len(params['gene_list'])} user-defined genes")
+                           if params.get("gene_list") else "All genes"),
         ("Minimum counts filter", f"{params.get('min_counts', 0)}"),
         ("MSigDB category (GSEA/ORA)", cat),
         ("ORA", ora_txt),
@@ -519,7 +528,15 @@ def _pages_log(w: _Writer, log_text: str):
         w.save(fig)
 
 
+# --------------------------------------------------------------------------
+# Public entry point
+# --------------------------------------------------------------------------
 def build_report(path: str, results, params: dict | None = None, log_text: str = "") -> str:
+    """Create the PDF report at `path` and return the path.
+
+    `results` is an engine.RunResults. `params` is the snapshot of the settings
+    used for the run (see DEAApp._run_analysis).
+    """
     if results is None or not results.per_contrast:
         raise ValueError("There are no results to put in the report.")
     params = dict(params or {})
