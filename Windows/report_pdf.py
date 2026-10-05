@@ -11,6 +11,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle, Patch
 
 import core_calcolo as engine
+import pca_coloring as pcol
 
 A4 = (8.27, 11.69)
 C = {
@@ -296,33 +297,66 @@ def _page_guide(w: _Writer):
     w.save(fig)
 
 
-def _page_pca(w: _Writer, results):
+def _page_pca(w: _Writer, results, params: dict | None = None):
+    params = params or {}
     df = results.pca_data
     fig = w.new("Principal Component Analysis", "Exploratory view of sample similarity")
     if df is None or df.empty or "condition" not in df.columns:
         _note_page_text(fig, "PCA data not available.")
         w.save(fig)
         return
-    ax = fig.add_axes([0.11, 0.42, 0.80, 0.46])
-    conds = sorted(df["condition"].astype(str).unique())
-    for i, cond in enumerate(conds):
-        sub = df[df["condition"].astype(str) == cond]
-        ax.scatter(sub["PC1"], sub["PC2"], s=55, alpha=0.85, edgecolor="black",
-                   linewidth=0.5, color=TAB10[i % len(TAB10)], label=str(cond))
-        if len(df) <= 40 and "SampleID" in sub.columns:
-            for _, r in sub.iterrows():
-                ax.annotate(str(r["SampleID"]), (r["PC1"], r["PC2"]), xytext=(4, 4),
-                            textcoords="offset points", fontsize=6)
+    cfg = params.get("pca_color") or {}
+    try:
+        spec = pcol.spec_from_settings(df, params.get("metadata_file", ""),
+                                       engine_col(params.get("sample_col", "1")), cfg)
+    except Exception:
+        spec = pcol.condition_spec(df, bool(cfg.get("colorblind", False)))
+    ax = fig.add_axes([0.11, 0.42, 0.72 if spec["mode"] == "numeric" else 0.80, 0.46])
+    artists, extra = pcol.draw_pca_points(ax, df, spec, size=55, alpha=0.85)
+    if len(df) <= 40 and "SampleID" in df.columns:
+        for _, r in df.iterrows():
+            ax.annotate(str(r["SampleID"]), (r["PC1"], r["PC2"]), xytext=(4, 4),
+                        textcoords="offset points", fontsize=6)
     ax.set_xlabel(results.pca_x_label, fontsize=8)
     ax.set_ylabel(results.pca_y_label, fontsize=8)
-    ax.legend(title="Condition", fontsize=7, title_fontsize=8, frameon=False)
+    if spec["mode"] == "numeric":
+        cax = fig.add_axes([0.86, 0.42, 0.02, 0.46])
+        cb = fig.colorbar(spec["_mappable"], cax=cax)
+        cb.set_label(spec["column"], fontsize=8)
+        cb.ax.tick_params(labelsize=7)
+        if extra:
+            from matplotlib.lines import Line2D
+            ax.legend(handles=[Line2D([], [], marker="o", ls="", markerfacecolor=c,
+                                      markeredgecolor="black", label=l) for l, c in extra],
+                      fontsize=7, frameon=False)
+    else:
+        ax.legend(title=spec["column"], fontsize=7, title_fontsize=8, frameon=False)
     ax.grid(alpha=0.25)
     _style_axes(ax)
 
-    rows = [[_trunc(c, 40), str(int((df["condition"].astype(str) == c).sum()))] for c in conds]
-    y = _section(fig, "Samples per condition", 0.37)
-    _table(fig, rows, ["Condition", "Samples"], [0.7, 0.3], y, w=0.5)
+    # Table: samples per condition (or per group of the chosen metadata column)
+    if spec["mode"] == "categorical":
+        vals = spec["values"].fillna(pcol.MISSING_LABEL)
+        head = spec["column"]
+    else:
+        vals = df["condition"].astype(str)
+        head = "Condition"
+    counts = vals.value_counts()
+    order = [g for g, _ in spec.get("groups", [])] if spec["mode"] == "categorical" \
+        else sorted(counts.index)
+    order += [k for k in counts.index if k not in order]
+    rows = [[_trunc(c, 40), str(int(counts[c]))] for c in order if c in counts.index]
+    if len(rows) > 14:   # keep the table inside the page
+        rest = sum(int(r_[1]) for r_ in rows[13:])
+        rows = rows[:13] + [[f"... {len(rows) - 13} other groups", str(rest)]]
+    y = _section(fig, f"Samples per group ({head})", 0.37)
+    _table(fig, rows, [head, "Samples"], [0.7, 0.3], y, w=0.5)
     w.save(fig)
+
+
+def engine_col(v):
+    v = str(v).strip()
+    return int(v) if v.isdigit() else v
 
 
 def _page_volcano(w: _Writer, res, s: dict, params: dict):
@@ -557,7 +591,7 @@ def build_report(path: str, results, params: dict | None = None, log_text: str =
         w = _Writer(pdf, generated)
         _page_cover(w, results, params, stats, generated)
         _page_guide(w)
-        _page_pca(w, results)
+        _page_pca(w, results, params)
         for tag, res in results.per_contrast.items():
             s = stats[tag]
             _page_volcano(w, res, s, params)
