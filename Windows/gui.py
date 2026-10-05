@@ -1,5 +1,7 @@
 from __future__ import annotations
+import json
 import math
+import re
 import os
 import threading
 import time
@@ -1160,13 +1162,14 @@ class DEAApp(ttk.Frame):
         self.gene_col = tk.StringVar(value="1")
         self.sample_col = tk.StringVar(value="1")
         self.condition_col = tk.StringVar(value="3")
+        self.gene_list_var = tk.StringVar(value="")   # comma-separated genes (empty = all genes)
         self.method = tk.StringVar(value="RNAseq")
         self.pairwise_all = tk.BooleanVar(value=False)
         self.padj_cutoff = tk.DoubleVar(value=0.05)
         self.lfc_cutoff = tk.DoubleVar(value=1.0)
         self.gsea_category = tk.StringVar(value="H")
         self.gsea_subcategory = tk.StringVar(value="")
-        self.min_counts_var = tk.IntVar(value=0)
+        self.min_counts_var = tk.IntVar(value=10)   # 10 = the filter that was previously hard-coded in the R pipeline
         self.top_n_pathways = tk.IntVar(value=15)
 
         self.pca_show_labels = tk.BooleanVar(value=False)
@@ -1450,6 +1453,14 @@ class DEAApp(ttk.Frame):
         add_tip(pairwise_cb, "If enabled, automatically analyzes every possible pair of "
                               "groups instead of one specific two-group comparison.")
 
+        genes_lbl = ttk.Label(group_frame, text="Genes to analyze (comma-separated, empty = all):")
+        genes_lbl.grid(row=3, column=0, sticky="w", **pad)
+        genes_entry = ttk.Entry(group_frame, textvariable=self.gene_list_var, width=60)
+        genes_entry.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
+        add_tip(genes_entry, "Optional: gene symbols separated by commas (e.g. TP53, BRCA1, MYC). "
+                              "If filled, ONLY these genes are used for the analysis (PCA included); "
+                              "ORA/GSEA are skipped. Leave empty to analyze all genes.")
+
         param_frame = ttk.LabelFrame(f, text="Analysis parameters (customizable)")
         param_frame.pack(fill=tk.X, padx=10, pady=8)
 
@@ -1457,8 +1468,9 @@ class DEAApp(ttk.Frame):
 
         counts_lbl = ttk.Label(param_frame, text="Minimum counts filter:")
         counts_lbl.grid(row=row_idx, column=0, sticky="w", padx=5, pady=6)
-        add_tip(counts_lbl, "Removes genes whose total read/count sum across all samples does not "
-                            "reach this value, improving the statistical power of the test.")
+        add_tip(counts_lbl, "RNA-seq only: removes genes whose total read/count sum across the samples of "
+                            "the compared groups does not reach this value, improving the statistical "
+                            "power of the test. Default 10. Not applied to microarray data.")
 
         slider_subframe = ttk.Frame(param_frame)
         slider_subframe.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=6)
@@ -1533,6 +1545,14 @@ class DEAApp(ttk.Frame):
                                   "Enabled once the files have been selected.")
         self.progress = ttk.Progressbar(run_frame, mode="indeterminate", length=250)
         self.progress.pack(side=tk.LEFT, padx=14)
+        save_set_btn = ttk.Button(run_frame, text="💾 Save settings", command=self._save_settings)
+        save_set_btn.pack(side=tk.LEFT, padx=6, pady=6)
+        add_tip(save_set_btn, "Saves all the analysis settings (files, columns, groups, genes, "
+                              "cutoffs, GSEA/ORA options) to a JSON file.")
+        load_set_btn = ttk.Button(run_frame, text="📂 Load settings", command=self._load_settings)
+        load_set_btn.pack(side=tk.LEFT, padx=6, pady=6)
+        add_tip(load_set_btn, "Loads a settings JSON file and fills in every field, so you can "
+                              "re-run exactly the same analysis (just press 'Run analysis').")
         self.report_button = ttk.Button(run_frame, text="📄 Download PDF report",
                                          command=self._export_pdf_report, state="disabled")
         self.report_button.pack(side=tk.LEFT, padx=6, pady=6)
@@ -1554,6 +1574,7 @@ class DEAApp(ttk.Frame):
         self.gene_col.set("1")
         self.sample_col.set("1")
         self.condition_col.set("2")
+        self.gene_list_var.set("")
         for child in self.groups_container.winfo_children():
             child.destroy()
         self.test_group_var.set("")
@@ -2031,6 +2052,132 @@ class DEAApp(ttk.Frame):
 
         threading.Thread(target=task, daemon=True).start()
 
+    SETTINGS_FORMAT = "de-gui-settings"
+    SETTINGS_VERSION = 1
+
+    def _collect_settings(self) -> dict:
+        """Everything that defines the analysis (not the plot cosmetics)."""
+        t, r = self.test_group_var.get(), self.ref_group_var.get()
+        gene_list = [g.strip() for g in re.split(r"[,;\n]+", self.gene_list_var.get()) if g.strip()]
+        return {
+            "counts_path": self.counts_path.get(),
+            "metadata_path": self.metadata_path.get(),
+            "method": self.method.get(),
+            "gene_col": self.gene_col.get(),
+            "sample_col": self.sample_col.get(),
+            "condition_col": self.condition_col.get(),
+            "pairwise_all": bool(self.pairwise_all.get()),
+            "test_group": t,
+            "ref_group": r,
+            "gene_list": gene_list,
+            "padj_cutoff": self.padj_cutoff.get(),
+            "lfc_cutoff": self.lfc_cutoff.get(),
+            "min_counts": self.min_counts_var.get(),
+            "gsea_category": self.gsea_category.get(),
+            "gsea_subcategory": self.gsea_subcategory.get(),
+            "run_ora": bool(self.run_ora.get()),
+            "ora_direction": self.ORA_DIRECTION_MAP.get(self.ora_direction_display.get(), "all"),
+            "top_n_pathways": self.top_n_pathways.get(),
+            "top_n_ora": self.top_n_ora.get(),
+        }
+
+    def _save_settings(self):
+        path = filedialog.asksaveasfilename(
+            title="Save analysis settings", defaultextension=".json",
+            filetypes=[("JSON settings", "*.json")], initialfile="analysis_settings.json")
+        if not path:
+            return
+        payload = {
+            "format": self.SETTINGS_FORMAT,
+            "version": self.SETTINGS_VERSION,
+            "saved": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "settings": self._collect_settings(),
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2, ensure_ascii=False)
+        except OSError as e:
+            messagebox.showerror("Error", f"Unable to save the settings: {e}")
+            return
+        self._log(f">>> Settings saved to {path}")
+        self.status_var.set("Settings saved.")
+
+    def _load_settings(self):
+        path = filedialog.askopenfilename(
+            title="Load analysis settings",
+            filetypes=[("JSON settings", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            if not isinstance(payload, dict) or payload.get("format") != self.SETTINGS_FORMAT:
+                raise ValueError("this is not a settings file created by this application.")
+            if int(payload.get("version", 0)) > self.SETTINGS_VERSION:
+                raise ValueError("the file was created by a newer version of the application.")
+            s = payload["settings"]
+            if not isinstance(s, dict):
+                raise ValueError("invalid 'settings' section.")
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            messagebox.showerror("Error", f"Unable to load the settings: {e}")
+            return
+
+        warnings = []
+
+        def put(var, key, cast=None):
+            if key not in s or s[key] is None:
+                return
+            try:
+                var.set(cast(s[key]) if cast else s[key])
+            except (ValueError, TypeError, tk.TclError):
+                warnings.append(f"invalid value for '{key}' (ignored)")
+
+        put(self.counts_path, "counts_path", str)
+        put(self.metadata_path, "metadata_path", str)
+        put(self.method, "method", str)
+        put(self.gene_col, "gene_col", str)
+        put(self.sample_col, "sample_col", str)
+        put(self.condition_col, "condition_col", str)
+        put(self.pairwise_all, "pairwise_all", bool)
+        put(self.padj_cutoff, "padj_cutoff", float)
+        put(self.lfc_cutoff, "lfc_cutoff", float)
+        put(self.min_counts_var, "min_counts", int)
+        put(self.gsea_category, "gsea_category", str)
+        put(self.gsea_subcategory, "gsea_subcategory", str)
+        put(self.run_ora, "run_ora", bool)
+        put(self.top_n_pathways, "top_n_pathways", int)
+        put(self.top_n_ora, "top_n_ora", int)
+        self.gene_list_var.set(", ".join(str(g) for g in (s.get("gene_list") or [])))
+        inv = {v: k for k, v in self.ORA_DIRECTION_MAP.items()}
+        self.ora_direction_display.set(inv.get(s.get("ora_direction", "all"), self.ORA_DIRECTION_DISPLAY[0]))
+
+        # Groups: they can only be selected once they have been extracted from the metadata.
+        for child in self.groups_container.winfo_children():
+            child.destroy()
+        self.available_groups = []
+        self.test_group_var.set("")
+        self.ref_group_var.set("")
+        self._pending_group_restore = None
+        for label, key in (("counts file", "counts_path"), ("metadata file", "metadata_path")):
+            p = s.get(key)
+            if p and not os.path.isfile(p):
+                warnings.append(f"the {label} was not found: {p}")
+        meta = self.metadata_path.get()
+        if meta and os.path.isfile(meta):
+            if s.get("test_group") or s.get("ref_group"):
+                self._pending_group_restore = (s.get("test_group", ""), s.get("ref_group", ""))
+            self._extract_groups()
+        else:
+            warnings.append("groups were not restored (metadata file unavailable): "
+                            "select the file and press 'Extract groups from metadata'.")
+
+        self._validate_setup()
+        self._update_contrast_preview()
+        self._log(f">>> Settings loaded from {path}")
+        self.status_var.set("Settings loaded.")
+        if warnings:
+            messagebox.showwarning("Settings loaded with warnings", "\n".join("- " + w for w in warnings))
+
     def _threadsafe_log(self, line: str):
         self.root.after(0, lambda: self._log(line))
 
@@ -2061,6 +2208,18 @@ class DEAApp(ttk.Frame):
                   f"{g} (n={counts.get(g, '?')})" for g in self.available_groups),
                   style="Muted.TLabel").grid(row=3, column=0, columnspan=3, sticky="w")
         self._toggle_pairwise()
+        pending = getattr(self, "_pending_group_restore", None)
+        self._pending_group_restore = None
+        if pending:
+            t, r = pending
+            missing = [g for g in (t, r) if g and g not in self.available_groups]
+            if missing:
+                messagebox.showwarning(
+                    "Settings", "These groups from the settings file are not in the metadata: "
+                                + ", ".join(missing))
+            else:
+                self.test_group_var.set(t or "")
+                self.ref_group_var.set(r or "")
         self._log(f">>> Groups found: {', '.join(self.available_groups)}")
         self.status_var.set(f"{len(self.available_groups)} groups found.")
         if hasattr(self, "chk_groups_lbl"):
@@ -2101,6 +2260,10 @@ class DEAApp(ttk.Frame):
 
         run_ora = self.run_ora.get()
         ora_direction = self.ORA_DIRECTION_MAP.get(self.ora_direction_display.get(), "all")
+        gene_list = [g.strip() for g in re.split(r"[,;\n]+", self.gene_list_var.get()) if g.strip()]
+        if gene_list and len(set(g.upper() for g in gene_list)) < 2:
+            messagebox.showerror("Error", "Enter at least 2 genes, or leave the field empty to analyze all genes.")
+            return
 
         # Snapshot of the settings used for this run (the widgets may change afterwards);
         # it is what the PDF report documents.
@@ -2113,6 +2276,7 @@ class DEAApp(ttk.Frame):
             "condition_col": self.condition_col.get(),
             "contrast": list(contrast) if contrast else None,
             "pairwise_all": self.pairwise_all.get(),
+            "gene_list": list(gene_list),
             "padj_cutoff": self.padj_cutoff.get(),
             "lfc_cutoff": self.lfc_cutoff.get(),
             "min_counts": self.min_counts_var.get(),
@@ -2148,6 +2312,7 @@ class DEAApp(ttk.Frame):
                     gsea_subcategory=(self.gsea_subcategory.get() or None),
                     run_ora=run_ora,
                     ora_direction=ora_direction,
+                    gene_list=gene_list or None,
                     log_callback=self._threadsafe_log,
                 )
                 self.root.after(0, lambda: self._on_results_ready(results))
