@@ -204,17 +204,26 @@ tryCatch({
       }
       pairs <- combn(groups, 2, simplify = FALSE)
       pair_tags <- character(0)
+      contrast_info <- list()
       for (p in pairs) {
         tag <- paste(p[1], "vs", p[2], sep = "_")
         pair_tags <- c(pair_tags, tag)
+        contrast_info[[length(contrast_info) + 1]] <-
+          list(tag = tag, group_high = p[1], group_low = p[2])
         run_one(p, tag)
       }
-      write(toJSON(list(pairs = pair_tags), auto_unbox = TRUE),
+      write(toJSON(list(pairs = pair_tags, contrasts = contrast_info), auto_unbox = TRUE),
             file.path(out_dir, "pairs.json"))
     } else {
       contrast <- as.character(cfg$contrast)
-      run_one(contrast, "main")
-      write(toJSON(list(pairs = "main"), auto_unbox = TRUE),
+      # The tag now carries the real comparison (e.g. "Drug_vs_Control"), no longer "main".
+      # contrast[1] = test group (numerator), contrast[2] = reference group (denominator).
+      tag <- paste(contrast[1], "vs", contrast[2], sep = "_")
+      run_one(contrast, tag)
+      write(toJSON(list(pairs = tag,
+                        contrasts = list(list(tag = tag, group_high = contrast[1],
+                                              group_low = contrast[2]))),
+                   auto_unbox = TRUE),
             file.path(out_dir, "pairs.json"))
     }
 
