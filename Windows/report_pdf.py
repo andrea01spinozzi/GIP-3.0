@@ -56,6 +56,12 @@ def _trunc(s, n) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _dir_names(res):
+    hi = res.group_high if getattr(res, "group_high", None) else "group 1 (log2FC>0)"
+    lo = res.group_low if getattr(res, "group_low", None) else "group 2 (log2FC<0)"
+    return hi, lo
+
+
 def _contrast_label(res) -> str:
     if res.group_high and res.group_low:
         return f"{res.group_high} vs {res.group_low}"
@@ -240,7 +246,7 @@ def _page_cover(w: _Writer, results, params: dict, stats: dict, generated: str):
             "n/a" if s["ora_sig"] is None else str(s["ora_sig"]),
         ])
     y = _table(fig, rows,
-               ["Contrast", "Genes tested", "padj < cutoff", "Up (DEG)", "Down (DEG)",
+               ["Contrast (A vs B)", "Genes tested", "padj < cutoff", "DEG higher in A", "DEG higher in B",
                 "GSEA sig.", "ORA sig."],
                [0.34, 0.12, 0.12, 0.10, 0.10, 0.11, 0.11], y, fs=7)
     _paragraph(fig, "DEG = padj below the cutoff AND |log2FC| at or above the cutoff. "
@@ -262,24 +268,26 @@ def _page_guide(w: _Writer):
         ("Volcano plot",
          "Each point is a gene. The x axis is the log2 fold change, the y axis is "
          "-log10(padj): the higher a point, the stronger the statistical evidence. A "
-         "positive log2FC means higher expression in the first group of the contrast, "
-         "a negative one higher expression in the second group. Dashed lines mark the "
+         "positive log2FC means higher expression in the first group of the contrast "
+         "(\"A\" in \"A vs B\"), a negative one higher expression in the second group "
+         "(B, the reference). Dashed lines mark the "
          "cutoffs; genes beyond both are the differentially expressed genes (DEGs)."),
         ("Top DEG tables",
-         "The most significant up- and down-regulated genes (sorted by padj). padj is the "
+         "The most significant genes higher in each group of the contrast (sorted by padj). padj is the "
          "p-value corrected for multiple testing (Benjamini-Hochberg / FDR); 'stat' is the "
          "test statistic of the differential expression test."),
         ("GSEA",
          "Gene Set Enrichment Analysis uses the whole ranked gene list. The Normalized "
          "Enrichment Score (NES) is positive when a pathway is enriched among genes "
-         "up-regulated in the first group and negative when enriched among down-regulated "
-         "ones. Asterisks mark padj < 0.05 (*), < 0.01 (**), < 0.001 (***)."),
+         "higher in the first group of the contrast (\"A\" in \"A vs B\") and negative when "
+         "enriched among genes higher in the second group (the reference). Asterisks mark padj < 0.05 (*), < 0.01 (**), < 0.001 (***)."),
         ("ORA",
          "Over-Representation Analysis tests whether the selected DEGs are over-represented "
          "in a pathway (hypergeometric test). The background is the set of genes actually "
          "tested. 'Count/SetSize' is the number of input genes in the pathway over the "
-         "pathway size, 'FE' is the fold enrichment. Direction is derived afterwards: UP/DOWN "
-         "if at least 80% of the pathway's input genes go in that direction, MIXED otherwise."),
+         "pathway size, 'FE' is the fold enrichment. Direction is derived afterwards: UP (higher in "
+         "group A) / DOWN (higher in group B) if at least 80% of the pathway's input genes "
+         "go in that direction, MIXED otherwise."),
         ("Reproducibility",
          "All parameters used for the run are listed on the first page, and the full "
          "processing log is attached at the end of the report."),
@@ -335,8 +343,8 @@ def _page_volcano(w: _Writer, res, s: dict, params: dict):
         ("Genes in results table", str(s["n_rows"])),
         ("Genes tested (non-NA p-value)", str(s["n_tested"])),
         ("padj < %.3g (any fold change)" % padj_cut, str(s["n_sig"])),
-        ("DEGs — up-regulated", str(s["n_up"])),
-        ("DEGs — down-regulated", str(s["n_down"])),
+        (f'DEGs — higher in "{_dir_names(res)[0]}"', str(s["n_up"])),
+        (f'DEGs — higher in "{_dir_names(res)[1]}"', str(s["n_down"])),
     ], 0.895, label_w=0.30)
 
     df = s["df"].dropna(subset=["padj"]).copy()
@@ -395,9 +403,10 @@ def _page_top_degs(w: _Writer, res, s: dict, params: dict, top_n: int = 20):
             out.append(row)
         return out
 
-    y = _section(fig, "Up-regulated", 0.895)
+    _hi, _lo = _dir_names(res)
+    y = _section(fig, f"Higher in {_trunc(_hi, 40)} (log2FC > 0)", 0.895)
     y = _table(fig, rows_for("Upregulated"), headers, widths, y)
-    y = _section(fig, "Down-regulated", y - 0.01)
+    y = _section(fig, f"Higher in {_trunc(_lo, 40)} (log2FC < 0)", y - 0.01)
     _table(fig, rows_for("Downregulated"), headers, widths, y)
     w.save(fig)
 
@@ -431,8 +440,9 @@ def _page_gsea(w: _Writer, res, params: dict):
             ax.text(wd + (0.05 if wd >= 0 else -0.05), bar.get_y() + bar.get_height() / 2,
                     stars, va="center", ha="left" if wd >= 0 else "right",
                     fontsize=8, fontweight="bold")
-    ax.legend(handles=[Patch(color=C["up"], label="Up-regulated"),
-                       Patch(color=C["down"], label="Down-regulated")],
+    _hi, _lo = _dir_names(res)
+    ax.legend(handles=[Patch(color=C["up"], label=f"NES > 0: higher in {_trunc(_hi, 28)}"),
+                       Patch(color=C["down"], label=f"NES < 0: higher in {_trunc(_lo, 28)}")],
               fontsize=7, frameon=False, loc="lower right")
     _style_axes(ax)
 
@@ -476,8 +486,9 @@ def _page_ora(w: _Writer, res, params: dict):
     ax.axvline(-np.log10(padj_cut), ls="--", color=C["up"], lw=1)
     ax.set_xlabel(r"$-\log_{10}$(padj)", fontsize=8)
     ax.tick_params(axis="y", labelsize=6.5)
-    ax.legend(handles=[Patch(color=C["up"], label="UP (>= 80% of genes)"),
-                       Patch(color=C["down"], label="DOWN (>= 80% of genes)"),
+    _hi, _lo = _dir_names(res)
+    ax.legend(handles=[Patch(color=C["up"], label=f"UP: higher in {_trunc(_hi, 24)} (>= 80% of genes)"),
+                       Patch(color=C["down"], label=f"DOWN: higher in {_trunc(_lo, 24)} (>= 80% of genes)"),
                        Patch(color=C["ns"], label="MIXED")],
               fontsize=7, frameon=False, loc="lower right")
     _style_axes(ax)
