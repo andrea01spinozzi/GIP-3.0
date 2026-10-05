@@ -75,7 +75,12 @@ main.py
 
 StandHard produces `counts_matrix_unito.tsv` and `metadata_unito.tsv`, which can be loaded directly into GIP.
 
+```bash
 <img width="918" height="918" alt="Resume pics" src="https://github.com/user-attachments/assets/0a3bba2e-9ba1-4949-aa04-75dc15a5e761" />
+#GIP
+
+```
+
 
 
 
