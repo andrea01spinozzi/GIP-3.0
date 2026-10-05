@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -350,6 +351,13 @@ class DEAResult:
     ora_tbl: Optional[pd.DataFrame] = None  
     ora_meta: Optional[dict] = None    
 
+    @property
+    def label(self) -> str:
+        """Human-readable contrast, always 'test group vs reference group'."""
+        if self.group_high and self.group_low:
+            return f"{self.group_high} vs {self.group_low}"
+        return str(self.tag).replace("_", " ")
+
 
 @dataclass
 class RunResults:
@@ -415,6 +423,11 @@ def run_dea(counts_path: str, metadata_path: str, method: str,
     tags = pairs_info["pairs"]
     if isinstance(tags, str):
         tags = [tags]
+    # Group names written explicitly by R (no more parsing of the tag string).
+    contrast_groups = {}
+    for c in pairs_info.get("contrasts", []) or []:
+        if isinstance(c, dict) and c.get("tag"):
+            contrast_groups[c["tag"]] = (c.get("group_high"), c.get("group_low"))
 
     per_contrast = {}
     for tag in tags:
@@ -436,7 +449,9 @@ def run_dea(counts_path: str, metadata_path: str, method: str,
                 ora_meta = json.load(f)
 
         group_high, group_low = None, None
-        if tag == "main" and contrast and len(contrast) == 2:
+        if tag in contrast_groups:
+            group_high, group_low = contrast_groups[tag]
+        elif tag == "main" and contrast and len(contrast) == 2:
             group_high, group_low = contrast[0], contrast[1]
         elif "_vs_" in tag:
             group_high, group_low = tag.split("_vs_", 1)
@@ -453,6 +468,30 @@ def run_dea(counts_path: str, metadata_path: str, method: str,
         pca_y_label=labels.get("y_label", "PC2"),
         per_contrast=per_contrast,
     )
+
+
+def annotate_regulation(ranked_tbl: pd.DataFrame, group_high: Optional[str],
+                        group_low: Optional[str], padj_cutoff: float = 0.05,
+                        lfc_cutoff: float = 1.0) -> pd.DataFrame:
+    """Rewrites 'Regulation' / 'Significant' of the gene table so that they:
+    - name the group in which the gene is higher ("Higher in X") instead of a bare UP/DOWN;
+    - take significance into account (same rule as the volcano: padj AND |log2FC| cutoffs),
+      so a non-significant gene is never labelled as regulated.
+    """
+    if ranked_tbl is None or ranked_tbl.empty:
+        return ranked_tbl
+    df = ranked_tbl.copy()
+    padj = pd.to_numeric(df["padj"], errors="coerce")
+    lfc = pd.to_numeric(df["log2FoldChange"], errors="coerce")
+    sig = (padj < padj_cutoff) & (lfc.abs() >= lfc_cutoff)
+    hi = group_high or "group 1 (log2FC>0)"
+    lo = group_low or "group 2 (log2FC<0)"
+    reg = pd.Series("Not significant", index=df.index)
+    reg[sig & (lfc > 0)] = f"Higher in {hi}"
+    reg[sig & (lfc < 0)] = f"Higher in {lo}"
+    df["Regulation"] = reg
+    df["Significant"] = np.where(sig, "Yes", "No")
+    return df
 
 
 def categorize_volcano(res_tbl: pd.DataFrame, padj_cutoff: float = 0.05,
