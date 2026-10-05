@@ -24,7 +24,7 @@ GIP was developed to remove these barriers. The statistics rely on established R
 - A few GB of free disk space; 8 GB of RAM or more is recommended for large cohorts
 
 ### Python
-Python 3.11 or later (on macOS use the installer from [python.org](https://www.python.org/downloads/), which includes Tk). Tkinter is included in standard Python installers (on Linux: `sudo apt install python3-tk`).
+Python 3.11 or later (on macOS use the installer from [python.org](https://www.python.org/downloads/), which includes Tk). Tkinter is included in standard Python installers.
 
 | Package | Used by | Required | Purpose |
 |---|---|---|---|
