@@ -1,9 +1,3 @@
-"""PDF report generator for DEA Explorer.
-
-Builds a multi-page A4 report (cover + parameters, how-to-read guide, PCA,
-and for every contrast: volcano plot, top DEGs, GSEA, ORA, plus the run log
-as an appendix) using only matplotlib, so no extra dependency is required.
-"""
 from __future__ import annotations
 
 import datetime
@@ -30,9 +24,6 @@ LOG_LINES_PER_PAGE = 84
 LOG_MAX_PAGES = 30
 
 
-# --------------------------------------------------------------------------
-# Small helpers
-# --------------------------------------------------------------------------
 def _fmt_sci(v) -> str:
     if v is None or pd.isna(v):
         return ""
@@ -159,9 +150,6 @@ def _note_page_text(fig: Figure, text: str, y: float = 0.5):
     fig.text(0.5, y, text, ha="center", va="center", fontsize=10, color=C["muted"])
 
 
-# --------------------------------------------------------------------------
-# Content pages
-# --------------------------------------------------------------------------
 def _contrast_stats(res, padj_cut: float, lfc_cut: float) -> dict:
     df = engine.categorize_volcano(res.res_tbl, padj_cut, lfc_cut)
     n_up = int((df["status"] == "Upregulated").sum())
@@ -531,15 +519,7 @@ def _pages_log(w: _Writer, log_text: str):
         w.save(fig)
 
 
-# --------------------------------------------------------------------------
-# Public entry point
-# --------------------------------------------------------------------------
 def build_report(path: str, results, params: dict | None = None, log_text: str = "") -> str:
-    """Create the PDF report at `path` and return the path.
-
-    `results` is an engine.RunResults. `params` is the snapshot of the settings
-    used for the run (see DEAApp._run_analysis).
-    """
     if results is None or not results.per_contrast:
         raise ValueError("There are no results to put in the report.")
     params = dict(params or {})
