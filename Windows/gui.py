@@ -216,8 +216,9 @@ HELP_CONTENT = {
             "statistically reliable that change is (Y axis).\n\n"
             "- X axis = log2FoldChange: expression change between the two "
             "conditions on a log2 scale. Example: log2FC = 2 means the gene is "
-            "expressed 4 times more (2^2) in the reference condition; log2FC = -1 "
-            "means expression is halved.\n"
+            "expressed 4 times more (2^2) in the FIRST group of the contrast (\"A\" in "
+            "\"A vs B\"; B is the reference/denominator); log2FC = -1 "
+            "means expression in A is half of that in B.\n"
             "- Y axis = -log10(padj): the HIGHER a point is, the lower (hence more "
             "significant) its padj is. -log10 is used only to make very small "
             "p-values readable on a chart (e.g. padj = 0.00001 becomes 5 on the Y "
@@ -261,9 +262,10 @@ HELP_CONTENT = {
             "Columns:\n"
             "- GeneID: gene identifier (symbol, e.g. KRAS, or Ensembl ID if the "
             "symbol is not available).\n"
-            "- Regulation: direction of change (Up-regulated / Down-regulated) "
-            "based on the sign of log2FoldChange, regardless of whether it is "
-            "significant or not.\n"
+            "- Regulation: states in which group the gene is higher "
+            "(\"Higher in A\" / \"Higher in B\") when it passes the padj AND log2FC "
+            "cutoffs set in the Setup tab; otherwise \"Not significant\". "
+            "The group names are those of the active contrast.\n"
             "- Significant: indicates whether the gene passes BOTH the padj cutoff "
             "AND the log2FC cutoff set in the Setup tab (i.e. whether it is colored "
             "in the volcano plot).\n"
@@ -283,8 +285,9 @@ HELP_CONTENT = {
             "- 'Filter (search GeneID)': type even part of a gene name to filter "
             "the table in real time (e.g. typing 'KRAS' also shows any related "
             "genes containing that string).\n"
-            "- Regulation dropdown: shows only Upregulated genes, only "
-            "Downregulated, or only Not Significant.\n"
+            "- Regulation dropdown: shows only genes higher in the first group, "
+            "only genes higher in the second (reference) group, or only "
+            "Not significant ones.\n"
             "- Click a column header (e.g. 'padj') to sort the table by that "
             "column; click again to reverse ascending/descending order.\n"
             "- 'Export CSV...': saves the currently filtered/sorted table to a CSV "
@@ -313,8 +316,9 @@ HELP_CONTENT = {
             "- NES (Normalized Enrichment Score): the enrichment score, normalized "
             "for gene set size (so pathways with more or fewer genes are "
             "comparable). Positive NES = the gene set is shifted toward the most "
-            "UP-regulated genes; negative NES = toward the most DOWN-regulated "
-            "genes.\n"
+            "genes higher in the FIRST group of the contrast (\"A\" in \"A vs B\"); "
+            "negative NES = toward the genes higher in the SECOND group "
+            "(the reference).\n"
             "- padj: as for single genes, this is the enrichment p-value corrected "
             "for the number of gene sets tested together.\n"
             "- Asterisks (*, **, ***) indicate padj<0.05, <0.01, <0.001 "
@@ -336,8 +340,9 @@ HELP_CONTENT = {
             "shown (name, NES, padj, gene set size) to a CSV file.\n"
             "- The table at the bottom shows the same data as the chart; click "
             "the headers to sort (e.g. by ascending padj).\n"
-            "- In the chart, red bars are 'Up-regulated' pathways (positive NES), "
-            "blue bars are 'Down-regulated' (negative NES).\n\n"
+            "- In the chart, red bars are pathways with positive NES (enriched "
+            "among genes higher in the first group, A), blue bars have negative NES "
+            "(higher in the second group, B). The legend names the two groups.\n\n"
             "Manual annotations and high-resolution export: identical to those "
             "described for the PCA tab — use the 'Manual annotations' bar to "
             "highlight a pathway of particular interest with an arrow or box "
@@ -364,7 +369,8 @@ HELP_CONTENT = {
             "tested (Benjamini-Hochberg).\n"
             "- Direction: ORA itself has no direction (the list is unordered). It is "
             "derived afterwards from the genes supporting each pathway: UP / DOWN if "
-            "at least 80% of them have log2FC > 0 / < 0, MIXED otherwise. N_UP and "
+            "at least 80% of them have log2FC > 0 (higher in the first group of the "
+            "contrast) / < 0 (higher in the reference group), MIXED otherwise. N_UP and "
             "N_DOWN give the exact counts.\n\n"
             "ORA and GSEA are complementary, not alternatives: ORA depends on the "
             "cutoffs used to build the gene list and ignores the magnitude of the "
@@ -1135,11 +1141,13 @@ class DEAApp(ttk.Frame):
 
     REGULATION_FILTER_OPTIONS = ["All", "Upregulated only", "Downregulated only", "Not Significant only"]
 
-    ORA_DIRECTION_DISPLAY = ["All DEGs (up + down)", "Up-regulated only", "Down-regulated only"]
+    ORA_DIRECTION_DISPLAY = ["All DEGs (both directions)",
+                             "Only genes higher in the 1st group (log2FC > 0)",
+                             "Only genes higher in the 2nd/reference group (log2FC < 0)"]
     ORA_DIRECTION_MAP = {
-        "All DEGs (up + down)": "all",
-        "Up-regulated only": "up",
-        "Down-regulated only": "down",
+        "All DEGs (both directions)": "all",
+        "Only genes higher in the 1st group (log2FC > 0)": "up",
+        "Only genes higher in the 2nd/reference group (log2FC < 0)": "down",
     }
 
     def __init__(self, root):
@@ -1191,11 +1199,18 @@ class DEAApp(ttk.Frame):
         self.table_regulation_filter = tk.StringVar(value=self.REGULATION_FILTER_OPTIONS[0])
 
         self.available_groups: list[str] = []
-        self.group_vars: dict[str, tk.BooleanVar] = {}
+        self.test_group_var = tk.StringVar(value="")   # numerator (log2FC > 0 = higher here)
+        self.ref_group_var = tk.StringVar(value="")    # denominator / reference
+        self.contrast_preview_var = tk.StringVar(value="")
+        self._contrast_combos: list = []                # one contrast selector per tab
+        self._direction_vars: dict[str, tk.StringVar] = {}  # one direction label per tab
         self.results: engine.RunResults | None = None
         self.run_params: dict | None = None
         self._pending_params: dict | None = None
         self.active_tag: tk.StringVar = tk.StringVar(value="")
+        self.test_group_var.trace_add("write", lambda *a: self._update_contrast_preview())
+        self.ref_group_var.trace_add("write", lambda *a: self._update_contrast_preview())
+        self.pairwise_all.trace_add("write", lambda *a: self._update_contrast_preview())
 
         self._run_start_time: float | None = None
         self._timer_job = None
@@ -1407,7 +1422,7 @@ class DEAApp(ttk.Frame):
         reset_btn.grid(row=0, column=2, rowspan=3, padx=(30, 8), pady=6, sticky="ns")
         add_tip(reset_btn, "Clears all the fields in this section so you can start over.")
 
-        method_frame = ttk.LabelFrame(f, text="Statistical method (chosen by the user)")
+        method_frame = ttk.LabelFrame(f, text="Statistical method (chosen by the user: StandHard datasets require DeSeq2)")
         method_frame.pack(fill=tk.X, padx=10, pady=8)
         rb1 = ttk.Radiobutton(method_frame, text="RNA-seq -> DESeq2 (Wald test)",
                                variable=self.method, value="RNAseq")
@@ -1504,7 +1519,7 @@ class DEAApp(ttk.Frame):
 
         ttk.Label(param_frame, text="ORA gene list:").grid(row=2, column=2, sticky="w", **pad)
         ora_dir_combo = ttk.Combobox(param_frame, textvariable=self.ora_direction_display,
-                                      values=self.ORA_DIRECTION_DISPLAY, state="readonly", width=22)
+                                      values=self.ORA_DIRECTION_DISPLAY, state="readonly", width=52)
         ora_dir_combo.grid(row=2, column=3, sticky="w", **pad)
         add_tip(ora_dir_combo, "Which significant genes are tested: all DEGs (up + down together), "
                                 "only the up-regulated or only the down-regulated ones.")
@@ -1541,7 +1556,8 @@ class DEAApp(ttk.Frame):
         self.condition_col.set("2")
         for child in self.groups_container.winfo_children():
             child.destroy()
-        self.group_vars = {}
+        self.test_group_var.set("")
+        self.ref_group_var.set("")
         self.available_groups = []
         self._validate_setup()
         self.status_var.set("Fields reset.")
@@ -1570,9 +1586,38 @@ class DEAApp(ttk.Frame):
             self.run_button.configure(state="normal" if (counts_ok and metadata_ok) else "disabled")
 
     def _toggle_pairwise(self):
-        state = "disabled" if self.pairwise_all.get() else "normal"
-        for child in self.groups_container.winfo_children():
-            child.configure(state=state)
+        pairwise = self.pairwise_all.get()
+        for name, st in (("test_combo", "disabled" if pairwise else "readonly"),
+                         ("ref_combo", "disabled" if pairwise else "readonly"),
+                         ("swap_btn", "disabled" if pairwise else "normal")):
+            w = getattr(self, name, None)
+            try:
+                if w is not None:
+                    w.configure(state=st)
+            except tk.TclError:
+                pass
+        self._update_contrast_preview()
+
+    def _update_contrast_preview(self):
+        if self.pairwise_all.get():
+            self.contrast_preview_var.set(
+                "Pairwise mode: every pair is analysed as \"A vs B\" (A comes first alphabetically). "
+                "log2FC > 0 = higher in A.")
+            return
+        t, r = self.test_group_var.get(), self.ref_group_var.get()
+        if not t or not r:
+            self.contrast_preview_var.set("Choose the test group and the reference group.")
+        elif t == r:
+            self.contrast_preview_var.set("✗ The test group and the reference group must be different.")
+        else:
+            self.contrast_preview_var.set(
+                f"Contrast: {t} vs {r}   →   log2FC > 0 = higher in \"{t}\"   |   "
+                f"log2FC < 0 = higher in \"{r}\" (reference)")
+
+    def _swap_groups(self):
+        t, r = self.test_group_var.get(), self.ref_group_var.get()
+        self.test_group_var.set(r)
+        self.ref_group_var.set(t)
 
     def _build_pca_tab(self, f):
         top_bar = ttk.Frame(f)
@@ -1614,27 +1659,75 @@ class DEAApp(ttk.Frame):
         self.pca_panel = InteractivePlotPanel(f, expl, redraw_callback=self._draw_pca)
         self.pca_panel.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
+    def _build_contrast_bar(self, parent, kind: str):
+        """Contrast selector + direction label, shown at the top of every result tab.
+        All selectors share self.active_tag, so they stay in sync."""
+        bar = ttk.Frame(parent)
+        bar.pack(fill=tk.X, padx=8, pady=(4, 0))
+        ttk.Label(bar, text="Contrast:", font=FONT_BOLD).pack(side=tk.LEFT)
+        combo = ttk.Combobox(bar, textvariable=self.active_tag, state="readonly", width=34)
+        combo.pack(side=tk.LEFT, padx=6)
+        combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_all_views())
+        self._contrast_combos.append(combo)
+        var = tk.StringVar(value="")
+        self._direction_vars[kind] = var
+        ttk.Label(parent, textvariable=var, font=FONT_BOLD,
+                  foreground=PALETTE["accent"]).pack(anchor="w", padx=8, pady=(0, 4))
+        return combo
+
+    def _active_result(self):
+        if self.results is None:
+            return None
+        return self.results.per_contrast.get(self.active_tag.get())
+
+    def _dir_names(self, res):
+        hi = res.group_high if res is not None and res.group_high else "group 1 (log2FC>0)"
+        lo = res.group_low if res is not None and res.group_low else "group 2 (log2FC<0)"
+        return hi, lo
+
+    def _contrast_title(self, tag: str) -> str:
+        res = self.results.per_contrast.get(tag) if self.results else None
+        return res.label if res is not None else str(tag).replace("_", " ")
+
+    def _regulation_options(self, res):
+        hi, lo = self._dir_names(res)
+        return ["All", f"Higher in {hi} only", f"Higher in {lo} only", "Not significant only"]
+
+    def _direction_text(self, kind: str, res) -> str:
+        if res is None:
+            return ""
+        if not (res.group_high and res.group_low):
+            return "The direction of the comparison cannot be determined automatically for this contrast."
+        hi, lo = res.group_high, res.group_low
+        if kind == "gsea":
+            return (f"Contrast {hi} vs {lo}:  NES > 0 = pathway enriched among genes higher in \"{hi}\"   |   "
+                    f"NES < 0 = among genes higher in \"{lo}\" (reference)")
+        if kind == "ora":
+            return (f"Contrast {hi} vs {lo}:  UP = genes higher in \"{hi}\"   |   "
+                    f"DOWN = genes higher in \"{lo}\" (reference)")
+        return (f"Contrast {hi} vs {lo}:  log2FC > 0 = higher in \"{hi}\"   |   "
+                f"log2FC < 0 = higher in \"{lo}\" (reference)")
+
+    def _update_direction_labels(self):
+        res = self._active_result()
+        for kind, var in self._direction_vars.items():
+            var.set(self._direction_text(kind, res))
+        combo = getattr(self, "table_reg_combo", None)
+        if combo is not None and res is not None:
+            opts = self._regulation_options(res)
+            combo["values"] = opts
+            if self.table_regulation_filter.get() not in opts:
+                self.table_regulation_filter.set(opts[0])
+
     def _build_volcano_tab(self, f):
         top_bar = ttk.Frame(f)
         top_bar.pack(fill=tk.X, padx=8, pady=(8, 0))
         self._build_help_button(top_bar, "volcano").pack(anchor="center", pady=(10, 5))
 
-        top = ttk.Frame(f)
-        top.pack(fill=tk.X, padx=8, pady=(4, 4))
-        ttk.Label(top, text="Contrast:", font=FONT_BOLD).pack(side=tk.LEFT)
-        self.volcano_contrast_combo = ttk.Combobox(top, textvariable=self.active_tag,
-                                                     state="readonly", width=28)
-        self.volcano_contrast_combo.pack(side=tk.LEFT, padx=6)
-        self.volcano_contrast_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_all_views())
-        ttk.Label(top, text="(after changing the cutoffs in the Setup tab, press 'Apply "
-                             "changes' below to update without rerunning R)",
-                  style="Muted.TLabel").pack(side=tk.LEFT, padx=10)
-
-        direction_bar = ttk.Frame(f)
-        direction_bar.pack(fill=tk.X, padx=8, pady=(0, 4))
-        self.direction_label_var = tk.StringVar(value="")
-        ttk.Label(direction_bar, textvariable=self.direction_label_var,
-                  font=FONT_BOLD, foreground=PALETTE["accent"]).pack(side=tk.LEFT)
+        self.volcano_contrast_combo = self._build_contrast_bar(f, "volcano")
+        ttk.Label(f, text="(after changing the cutoffs in the Setup tab, press 'Apply "
+                          "changes' below to update without rerunning R)",
+                  style="Muted.TLabel").pack(anchor="w", padx=8, pady=(0, 4))
 
         controls = ttk.Frame(f)
         controls.pack(fill=tk.X, padx=8, pady=(0, 4))
@@ -1727,6 +1820,7 @@ class DEAApp(ttk.Frame):
         top_bar = ttk.Frame(f)
         top_bar.pack(fill=tk.X, padx=8, pady=(6, 0))
         self._build_help_button(top_bar, "table").pack(anchor="center", pady=(10, 5))
+        self._build_contrast_bar(f, "table")
 
         top = ttk.Frame(f)
         top.pack(fill=tk.X, padx=8, pady=6)
@@ -1737,7 +1831,7 @@ class DEAApp(ttk.Frame):
         entry.bind("<KeyRelease>", lambda e: self._populate_gene_table())
         add_tip(entry, "Type to filter the table in real time by gene name.")
 
-        reg_combo = ttk.Combobox(top, textvariable=self.table_regulation_filter, state="readonly",
+        reg_combo = self.table_reg_combo = ttk.Combobox(top, textvariable=self.table_regulation_filter, state="readonly",
                                   width=22, values=self.REGULATION_FILTER_OPTIONS)
         reg_combo.pack(side=tk.LEFT, padx=10)
         reg_combo.bind("<<ComboboxSelected>>", lambda e: self._populate_gene_table())
@@ -1755,7 +1849,7 @@ class DEAApp(ttk.Frame):
         self.gene_tree = ttk.Treeview(table_container, columns=columns, show="headings", height=20)
         for c in columns:
             self.gene_tree.heading(c, text=c, command=lambda cc=c: self._sort_tree(self.gene_tree, cc, False))
-            self.gene_tree.column(c, width=110, anchor="center")
+            self.gene_tree.column(c, width=190 if c == "Regulation" else 110, anchor="center")
         self.gene_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.gene_tree.tag_configure("up", foreground=PALETTE["up"])
         self.gene_tree.tag_configure("down", foreground=PALETTE["down"])
@@ -1769,6 +1863,7 @@ class DEAApp(ttk.Frame):
         top_bar = ttk.Frame(f)
         top_bar.pack(fill=tk.X, padx=8, pady=(6, 0))
         self._build_help_button(top_bar, "gsea").pack(anchor="center", pady=(10, 5))
+        self._build_contrast_bar(f, "gsea")
 
         top = ttk.Frame(f)
         top.pack(fill=tk.X, padx=8, pady=6)
@@ -1794,7 +1889,9 @@ class DEAApp(ttk.Frame):
 
         expl = ("GSEA (Gene Set Enrichment Analysis): shows the most modulated "
                 "biological pathways. NES (Normalized Enrichment Score) positive = "
-                "pathway activated in the reference group, negative = repressed. Only "
+                "pathway enriched among genes higher in the FIRST group of the contrast "
+                "(\"A\" in \"A vs B\"), negative = among genes higher in the reference "
+                "group (B). Only "
                 "pathways with padj below the chosen threshold (or the top N by |NES| "
                 "if none is significant) are shown. Use the 'Manual annotations' bar "
                 "to highlight pathways of interest before exporting the figure.")
@@ -1814,6 +1911,7 @@ class DEAApp(ttk.Frame):
         top_bar = ttk.Frame(f)
         top_bar.pack(fill=tk.X, padx=8, pady=(6, 0))
         self._build_help_button(top_bar, "ora").pack(anchor="center", pady=(10, 5))
+        self._build_contrast_bar(f, "ora")
 
         top = ttk.Frame(f)
         top.pack(fill=tk.X, padx=8, pady=6)
@@ -1927,7 +2025,7 @@ class DEAApp(ttk.Frame):
                 )
                 self.root.after(0, lambda: self._on_groups_ready(data))
             except engine.RPipelineError as e:
-                self.root.after(0, lambda: self._on_error("Group extraction failed", e))
+                self.root.after(0, lambda e=e: self._on_error("Group extraction failed", e))
             finally:
                 self.root.after(0, lambda: (self.progress.stop(), self.status_var.set("Ready.")))
 
@@ -1940,14 +2038,29 @@ class DEAApp(ttk.Frame):
         self.available_groups = data.get("groups", [])
         for child in self.groups_container.winfo_children():
             child.destroy()
-        self.group_vars = {}
+        self.test_group_var.set("")
+        self.ref_group_var.set("")
         counts = data.get("counts", {})
-        for i, g in enumerate(self.available_groups):
-            var = tk.BooleanVar(value=False)
-            n = counts.get(g, "?")
-            cb = ttk.Checkbutton(self.groups_container, text=f"{g} (n={n})", variable=var)
-            cb.grid(row=i // 4, column=i % 4, sticky="w", padx=8, pady=2)
-            self.group_vars[g] = var
+        gc = self.groups_container
+        ttk.Label(gc, text="Test group (numerator):").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
+        self.test_combo = ttk.Combobox(gc, textvariable=self.test_group_var, values=self.available_groups,
+                                        state="readonly", width=30)
+        self.test_combo.grid(row=0, column=1, sticky="w", pady=2)
+        ttk.Label(gc, text="Reference group (denominator):").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
+        self.ref_combo = ttk.Combobox(gc, textvariable=self.ref_group_var, values=self.available_groups,
+                                       state="readonly", width=30)
+        self.ref_combo.grid(row=1, column=1, sticky="w", pady=2)
+        self.swap_btn = ttk.Button(gc, text="⇄ Swap", command=self._swap_groups)
+        self.swap_btn.grid(row=0, column=2, rowspan=2, padx=12)
+        add_tip(self.test_combo, "log2FC > 0 (and positive NES in GSEA) means HIGHER in this group.")
+        add_tip(self.ref_combo, "The baseline: the group the test group is compared against "
+                                "(denominator of the fold change).")
+        ttk.Label(gc, textvariable=self.contrast_preview_var, font=FONT_BOLD,
+                  foreground=PALETTE["accent"]).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        ttk.Label(gc, text="Samples per group: " + ", ".join(
+                  f"{g} (n={counts.get(g, '?')})" for g in self.available_groups),
+                  style="Muted.TLabel").grid(row=3, column=0, columnspan=3, sticky="w")
+        self._toggle_pairwise()
         self._log(f">>> Groups found: {', '.join(self.available_groups)}")
         self.status_var.set(f"{len(self.available_groups)} groups found.")
         if hasattr(self, "chk_groups_lbl"):
@@ -1974,17 +2087,17 @@ class DEAApp(ttk.Frame):
             messagebox.showerror("Error", "Please select both the counts file and the metadata file.")
             return
 
-        selected = [g for g, v in self.group_vars.items() if v.get()]
         contrast = None
         if not self.pairwise_all.get():
-            if len(selected) != 2:
+            t, r = self.test_group_var.get(), self.ref_group_var.get()
+            if not t or not r or t == r:
                 messagebox.showerror(
                     "Error",
-                    "Select EXACTLY 2 groups to compare, or enable the pairwise "
-                    "comparison of all pairs."
+                    "Choose a test group and a DIFFERENT reference group, or enable the "
+                    "pairwise comparison of all pairs."
                 )
                 return
-            contrast = selected
+            contrast = [t, r]   # [numerator, denominator]: log2FC > 0 = higher in t
 
         run_ora = self.run_ora.get()
         ora_direction = self.ORA_DIRECTION_MAP.get(self.ora_direction_display.get(), "all")
@@ -2039,7 +2152,7 @@ class DEAApp(ttk.Frame):
                 )
                 self.root.after(0, lambda: self._on_results_ready(results))
             except engine.RPipelineError as e:
-                self.root.after(0, lambda: self._on_error("Analysis failed", e))
+                self.root.after(0, lambda e=e: self._on_error("Analysis failed", e))
             finally:
                 self.root.after(0, self._stop_run_ui)
 
@@ -2071,7 +2184,8 @@ class DEAApp(ttk.Frame):
         if hasattr(self, "report_button"):
             self.report_button.configure(state="normal")
         tags = list(results.per_contrast.keys())
-        self.volcano_contrast_combo["values"] = tags
+        for _c in self._contrast_combos:
+            _c["values"] = tags
         if tags:
             self.active_tag.set(tags[0])
         self._log(">>> Analysis completed successfully.")
@@ -2081,6 +2195,7 @@ class DEAApp(ttk.Frame):
     def _refresh_all_views(self):
         if self.results is None:
             return
+        self._update_direction_labels()
         self._draw_pca()
         self._draw_volcano()
         self._populate_gene_table()
@@ -2163,16 +2278,6 @@ class DEAApp(ttk.Frame):
             panel.redraw()
             return
         res = self.results.per_contrast[tag]
-        if hasattr(self, "direction_label_var"):
-            if res.group_high and res.group_low:
-                self.direction_label_var.set(
-                    f"Positive log2FC = higher expression in \"{res.group_high}\"   |   "
-                    f"Negative log2FC = higher expression in \"{res.group_low}\""
-                )
-            else:
-                self.direction_label_var.set(
-                    "log2FC direction cannot be determined automatically for this contrast."
-                )
         df = engine.categorize_volcano(res.res_tbl, self.padj_cutoff.get(), self.lfc_cutoff.get())
         df = df.dropna(subset=["padj"]).copy()
         df["neglog10_padj"] = -np.log10(df["padj"].clip(lower=1e-300))
@@ -2198,7 +2303,7 @@ class DEAApp(ttk.Frame):
         panel.ax.axhline(-math.log10(self.padj_cutoff.get()), linestyle="--", color="#8a8a8a", linewidth=1)
         panel.ax.set_xlabel("log2 Fold Change")
         panel.ax.set_ylabel("-log10(padj)")
-        title = self.volcano_title_var.get().strip() or f"Volcano Plot — {tag.replace('_', ' ')}"
+        title = self.volcano_title_var.get().strip() or f"Volcano Plot — {self._contrast_title(tag)}"
         panel.ax.set_title(title)
         panel.place_legend()
 
@@ -2239,27 +2344,34 @@ class DEAApp(ttk.Frame):
             if hasattr(self, "table_count_lbl"):
                 self.table_count_lbl.configure(text="")
             return
-        ranked = self.results.per_contrast[tag].ranked_tbl
+        res = self.results.per_contrast[tag]
+        ranked = res.ranked_tbl
         if ranked is None or ranked.empty:
             if hasattr(self, "table_count_lbl"):
                 self.table_count_lbl.configure(text="No genes to show.")
             return
+        # Regulation/Significant recomputed with the current cutoffs, naming the groups
+        ranked = engine.annotate_regulation(ranked, res.group_high, res.group_low,
+                                            self.padj_cutoff.get(), self.lfc_cutoff.get())
+        hi, lo = self._dir_names(res)
         filt = self.table_filter_var.get().strip().lower()
         if filt:
             ranked = ranked[ranked["GeneID"].astype(str).str.lower().str.contains(filt)]
 
         reg_filter = self.table_regulation_filter.get()
-        if reg_filter == "Upregulated only" and "Regulation" in ranked.columns:
-            ranked = ranked[ranked["Regulation"].astype(str).str.contains("Up", case=False, na=False)]
-        elif reg_filter == "Downregulated only" and "Regulation" in ranked.columns:
-            ranked = ranked[ranked["Regulation"].astype(str).str.contains("Down", case=False, na=False)]
-        elif reg_filter == "Not Significant only" and "Significant" in ranked.columns:
-            ranked = ranked[~ranked["Significant"].astype(str).str.contains("Yes|True", case=False, na=False)]
+        opts = self._regulation_options(res)
+        if reg_filter == opts[1]:
+            ranked = ranked[ranked["Regulation"] == f"Higher in {hi}"]
+        elif reg_filter == opts[2]:
+            ranked = ranked[ranked["Regulation"] == f"Higher in {lo}"]
+        elif reg_filter == opts[3]:
+            ranked = ranked[ranked["Regulation"] == "Not significant"]
 
         for _, r in ranked.iterrows():
-            reg_text = str(r.get("Regulation", "")).lower()
+            reg_text = str(r.get("Regulation", ""))
             sig_text = str(r.get("Significant", ""))
-            row_tag = "up" if "up" in reg_text else ("down" if "down" in reg_text else "ns")
+            row_tag = ("up" if reg_text == f"Higher in {hi}" else
+                       "down" if reg_text == f"Higher in {lo}" else "ns")
             self.gene_tree.insert("", "end", values=(
                 r.get("GeneID", ""), r.get("Regulation", ""), sig_text,
                 round(r.get("log2FoldChange", float("nan")), 3) if pd.notna(r.get("log2FoldChange")) else "",
@@ -2294,7 +2406,7 @@ class DEAApp(ttk.Frame):
         colors = plot_data["Direction"].map({"Up-regulated": PALETTE["up"], "Down-regulated": PALETTE["down"]})
         bars = panel.ax.barh(plot_data["pathway_clean"], plot_data["NES"], color=colors)
         panel.ax.set_xlabel("Normalized Enrichment Score (NES)")
-        title = self.gsea_title_var.get().strip() or f"Top Modulated Pathways — {tag.replace('_', ' ')}"
+        title = self.gsea_title_var.get().strip() or f"Top Modulated Pathways — {self._contrast_title(tag)}"
         panel.ax.set_title(title)
         panel.ax.axvline(0, color="black", linewidth=0.8)
         panel.ax.tick_params(axis="y", labelsize=8)
@@ -2322,8 +2434,9 @@ class DEAApp(ttk.Frame):
         new_xmax = xmax*1.15 if xmax > 0 else xmax
         panel.ax.set_xlim(left=new_xmin, right=new_xmax)
         
-        up_patch = mpatches.Patch(color=PALETTE["up"], label="Up-regulated")
-        down_patch = mpatches.Patch(color=PALETTE["down"], label="Down-regulated")
+        _hi, _lo = self._dir_names(self.results.per_contrast[tag])
+        up_patch = mpatches.Patch(color=PALETTE["up"], label=f"NES > 0: higher in {_hi}")
+        down_patch = mpatches.Patch(color=PALETTE["down"], label=f"NES < 0: higher in {_lo}")
         panel.place_legend(handles=[up_patch, down_patch])
         panel.apply_common_style()
         panel.redraw()
@@ -2370,7 +2483,7 @@ class DEAApp(ttk.Frame):
         plot_data, msg = engine.filter_top_ora(
             ora_tbl, top_n=self.top_n_ora.get(), padj_cutoff=cutoff)
         n_in = (res.ora_meta or {}).get("n_input_genes")
-        title = self.ora_title_var.get().strip() or f"Top Enriched Pathways (ORA) — {tag.replace('_', ' ')}"
+        title = self.ora_title_var.get().strip() or f"Top Enriched Pathways (ORA) — {self._contrast_title(tag)}"
         dir_colors = {"UP": PALETTE["up"], "DOWN": PALETTE["down"], "MIXED": PALETTE["ns"]}
 
         if self.ora_chart_type.get() == "Dot":
@@ -2403,8 +2516,8 @@ class DEAApp(ttk.Frame):
             panel.ax.tick_params(axis="y", labelsize=8)
             panel.ax.set_title(title)
             handles = [
-                mpatches.Patch(color=PALETTE["up"], label="UP (>= 80% of genes)"),
-                mpatches.Patch(color=PALETTE["down"], label="DOWN (>= 80% of genes)"),
+                mpatches.Patch(color=PALETTE["up"], label=f"UP: higher in {self._dir_names(res)[0]} (>= 80% of genes)"),
+                mpatches.Patch(color=PALETTE["down"], label=f"DOWN: higher in {self._dir_names(res)[1]} (>= 80% of genes)"),
                 mpatches.Patch(color=PALETTE["ns"], label="MIXED"),
             ]
             panel.place_legend(handles=handles)
@@ -2480,7 +2593,10 @@ class DEAApp(ttk.Frame):
         path = filedialog.asksaveasfilename(defaultextension=".csv",
                                              filetypes=[("CSV", "*.csv")])
         if path:
-            self.results.per_contrast[tag].ranked_tbl.to_csv(path, index=False)
+            res = self.results.per_contrast[tag]
+            out = engine.annotate_regulation(res.ranked_tbl, res.group_high, res.group_low,
+                                             self.padj_cutoff.get(), self.lfc_cutoff.get())
+            out.to_csv(path, index=False)
             self.status_var.set(f"Table exported to: {path}")
 
     def _export_gsea_table(self):
