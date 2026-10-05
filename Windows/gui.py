@@ -34,6 +34,7 @@ except ImportError:
     HAS_DND = False
 
 import core_calcolo as engine
+import pca_coloring as pcol
 import report_pdf
 
 
@@ -178,6 +179,11 @@ HELP_CONTENT = {
             "transcriptomic effect."
         ),
         "usage": (
+            "- 'Color by': colors the points by any column of the metadata file "
+            "(age, tumor stage, sex, treatment...). Numeric columns get a continuous "
+            "color scale with a color bar; text columns get one distinct color per "
+            "group, with a legend. Missing values are grey. Use 'Type' to force "
+            "numeric/categorical and 'Scale' to choose the numeric color scale.\n"
             "- 'Show sample labels': writes the ID of each sample next to its "
             "point.\n"
             "- 'Confidence ellipses per group': draws an ellipse around the samples "
@@ -1176,6 +1182,11 @@ class DEAApp(ttk.Frame):
         self.pca_show_ellipses = tk.BooleanVar(value=False)
         self.pca_colorblind = tk.BooleanVar(value=False)
         self.pca_title_var = tk.StringVar(value="")
+        self.pca_color_col = tk.StringVar(value=pcol.DEFAULT_COLUMN)
+        self.pca_color_kind = tk.StringVar(value="Auto")
+        self.pca_cmap = tk.StringVar(value="Red → Blue")
+        self._pca_colorbar = None
+        self._meta_cache = (None, None, None)   # (path, mtime, DataFrame)
 
         self.volcano_label_mode_display = tk.StringVar(value=self.LABEL_MODE_DISPLAY[0])
         self.volcano_label_topn = tk.IntVar(value=15)
@@ -1567,6 +1578,7 @@ class DEAApp(ttk.Frame):
 
         self.counts_path.trace_add("write", lambda *a: self._validate_setup())
         self.metadata_path.trace_add("write", lambda *a: self._validate_setup())
+        self.metadata_path.trace_add("write", lambda *a: self._refresh_pca_color_columns())
 
     def _reset_setup_fields(self):
         self.counts_path.set("")
@@ -1669,6 +1681,34 @@ class DEAApp(ttk.Frame):
         add_tip(title_entry, "Overrides the chart's default title.")
         ttk.Button(top, text="Apply", style="Accent.TButton",
                    command=self._draw_pca).pack(side=tk.LEFT, padx=12)
+
+        top2 = ttk.Frame(f)
+        top2.pack(fill=tk.X, padx=8, pady=(0, 4))
+        ttk.Label(top2, text="Color by:").pack(side=tk.LEFT)
+        self.pca_color_combo = ttk.Combobox(top2, textvariable=self.pca_color_col,
+                                            state="readonly", width=28,
+                                            values=[pcol.DEFAULT_COLUMN],
+                                            postcommand=self._refresh_pca_color_columns)
+        self.pca_color_combo.pack(side=tk.LEFT, padx=(4, 12))
+        self.pca_color_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_pca())
+        add_tip(self.pca_color_combo,
+                "Colors the PCA points by any column of the metadata file. Numeric "
+                "columns (e.g. age) get a continuous color scale with a color bar; "
+                "text columns (e.g. tumor stage) get one distinct color per group. "
+                "Missing values ('not available', empty...) are shown in grey.")
+        ttk.Label(top2, text="Type:").pack(side=tk.LEFT)
+        kind_combo = ttk.Combobox(top2, textvariable=self.pca_color_kind, state="readonly",
+                                  width=12, values=pcol.KIND_CHOICES)
+        kind_combo.pack(side=tk.LEFT, padx=(4, 12))
+        kind_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_pca())
+        add_tip(kind_combo, "'Auto' decides from the values. Force 'Categorical' for numeric "
+                            "codes that are really groups, or 'Numeric' for a continuous scale.")
+        ttk.Label(top2, text="Scale (numeric):").pack(side=tk.LEFT)
+        cmap_combo = ttk.Combobox(top2, textvariable=self.pca_cmap, state="readonly",
+                                  width=12, values=list(pcol.CMAPS.keys()))
+        cmap_combo.pack(side=tk.LEFT, padx=4)
+        cmap_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_pca())
+        add_tip(cmap_combo, "Color scale used for numeric columns (low → high).")
 
         expl = ("PCA (Principal Component Analysis): each point is a sample. Samples "
                 "with a similar color/condition that are close together indicate "
@@ -2354,6 +2394,7 @@ class DEAApp(ttk.Frame):
         if tags:
             self.active_tag.set(tags[0])
         self._log(">>> Analysis completed successfully.")
+        self._refresh_pca_color_columns()
         self._refresh_all_views()
         self.notebook.select(self.tab_pca)
 
@@ -2367,48 +2408,105 @@ class DEAApp(ttk.Frame):
         self._draw_gsea()
         self._draw_ora()
 
+    # ---- PCA coloring helpers -------------------------------------------------
+    def _pca_meta_source(self):
+        """(metadata_path, sample_col) of the run that produced the current results."""
+        rp = self.run_params or {}
+        path = rp.get("metadata_file") or self.metadata_path.get()
+        sample_col = self._parse_col(str(rp.get("sample_col", self.sample_col.get())))
+        return path, sample_col
+
+    def _refresh_pca_color_columns(self):
+        """Fills the 'Color by' list with the columns of the metadata file."""
+        combo = getattr(self, "pca_color_combo", None)
+        if combo is None:
+            return
+        path = self.metadata_path.get().strip()
+        cols = []
+        if path and os.path.isfile(path):
+            try:
+                mtime = os.path.getmtime(path)
+                if self._meta_cache[0] != path or self._meta_cache[1] != mtime:
+                    self._meta_cache = (path, mtime, pcol.read_metadata(path))
+                cols = list(self._meta_cache[2].columns)
+            except Exception:
+                cols = []
+        combo["values"] = [pcol.DEFAULT_COLUMN] + cols
+        if self.pca_color_col.get() not in combo["values"]:
+            self.pca_color_col.set(pcol.DEFAULT_COLUMN)
+
+    def pca_color_settings(self) -> dict:
+        return {"column": self.pca_color_col.get(), "kind": self.pca_color_kind.get(),
+                "colorblind": bool(self.pca_colorblind.get()), "cmap": self.pca_cmap.get()}
+
     def _draw_pca(self):
         if self.results is None:
             return
         panel = self.pca_panel
+        if self._pca_colorbar is not None:
+            try:
+                self._pca_colorbar.remove()
+            except Exception:
+                pass
+            self._pca_colorbar = None
         panel.clear()
         df = self.results.pca_data
         if "condition" not in df.columns:
             panel.redraw()
             return
-        conditions = sorted(df["condition"].unique())
-        colors = OKABE_ITO if self.pca_colorblind.get() else plt.cm.tab10.colors
-        artists = []
-        for i, cond in enumerate(conditions):
-            sub = df[df["condition"] == cond]
-            color = colors[i % len(colors)]
-            sc = panel.ax.scatter(sub["PC1"], sub["PC2"], label=str(cond),
-                                   color=color, s=80, alpha=0.85,
-                                   edgecolor="black", linewidth=0.5)
-            artists.append((sc, sub))
-            if self.pca_show_ellipses.get():
-                confidence_ellipse(sub["PC1"].values, sub["PC2"].values, panel.ax,
-                                    n_std=1.5, facecolor=color, alpha=0.15,
+
+        meta_path, sample_col = self._pca_meta_source()
+        try:
+            spec = pcol.spec_from_settings(df, meta_path, sample_col, self.pca_color_settings())
+        except Exception as e:
+            messagebox.showwarning("PCA colors",
+                                   f"Cannot color by '{self.pca_color_col.get()}':\n{e}\n\n"
+                                   "Falling back to the condition colors.")
+            self.pca_color_col.set(pcol.DEFAULT_COLUMN)
+            spec = pcol.condition_spec(df, self.pca_colorblind.get())
+
+        show_ellipses = self.pca_show_ellipses.get()
+
+        def ellipse_fn(x, y, ax, color):
+            if show_ellipses:
+                confidence_ellipse(x, y, ax, n_std=1.5, facecolor=color, alpha=0.15,
                                     edgecolor=color, linewidth=1.2)
-            if self.pca_show_labels.get() and "SampleID" in sub.columns:
-                for _, r in sub.iterrows():
-                    panel.ax.annotate(str(r["SampleID"]), xy=(r["PC1"], r["PC2"]),
-                                       xytext=(4, 4), textcoords="offset points", fontsize=7)
+
+        artists, extra_handles = pcol.draw_pca_points(panel.ax, df, spec, size=80,
+                                                      alpha=0.85, ellipse_fn=ellipse_fn)
+        if self.pca_show_labels.get() and "SampleID" in df.columns:
+            for _, r in df.iterrows():
+                panel.ax.annotate(str(r["SampleID"]), xy=(r["PC1"], r["PC2"]),
+                                   xytext=(4, 4), textcoords="offset points", fontsize=7)
         panel.ax.set_xlabel(self.results.pca_x_label)
         panel.ax.set_ylabel(self.results.pca_y_label)
         title = self.pca_title_var.get().strip() or "PCA of Count Data"
         panel.ax.set_title(title)
-        panel.place_legend(title="Condition")
+
+        if spec["mode"] == "numeric":
+            # Legend = colour bar (+ a small legend entry for missing values, if any)
+            if panel.legend_on.get():
+                self._pca_colorbar = pcol.add_colorbar(panel.figure, panel.ax, spec)
+            if extra_handles and panel.legend_on.get():
+                from matplotlib.lines import Line2D
+                handles = [Line2D([], [], marker="o", ls="", markerfacecolor=c,
+                                   markeredgecolor="black", label=lbl) for lbl, c in extra_handles]
+                panel.place_legend(handles=handles)
+        else:
+            panel.place_legend(title=spec["column"])
         panel.apply_common_style()
 
-        if HAS_MPLCURSORS:
+        if HAS_MPLCURSORS and artists:
             all_sc = [a for a, _ in artists]
             all_sub = [s for _, s in artists]
+            col_name = spec["column"]
 
             def fmt(idx_tuple):
                 artist_idx, point_idx = idx_tuple
-                sample_id = all_sub[artist_idx].iloc[point_idx].get("SampleID", "?")
-                return str(sample_id)
+                row = all_sub[artist_idx].iloc[point_idx]
+                val = row.get("_val")
+                val = "n.a." if pd.isna(val) else val
+                return f"{row.get('SampleID', '?')}\n{col_name}: {val}"
             panel.enable_hover(all_sc, lambda idx: fmt(idx) if isinstance(idx, tuple) else str(idx))
         panel.redraw()
 
@@ -2724,6 +2822,7 @@ class DEAApp(ttk.Frame):
             return
         results = self.results
         params = dict(self.run_params or {})
+        params["pca_color"] = self.pca_color_settings()   # same coloring as the on-screen PCA
         log_text = self.log_text.get("1.0", "end")
         self.report_button.configure(state="disabled")
         self.status_var.set("Generating PDF report... this may take a few seconds.")
