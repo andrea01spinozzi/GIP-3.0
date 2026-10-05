@@ -227,9 +227,11 @@ class PipelineConfig:
 
     run_ora: bool = True
     ora_direction: str = "all"     
+    gene_list: Optional[list] = None   # if set, only these genes are analyzed
 
     min_reads: int = 10
     min_samples: int = 3
+    min_counts: int = 10          # RNA-seq: minimum total counts per gene (DESeq2 pre-filter)
     
     out_dir: Optional[str] = None
 
@@ -250,8 +252,10 @@ class PipelineConfig:
             "gsea_subcategory": self.gsea_subcategory,
             "run_ora": self.run_ora,
             "ora_direction": self.ora_direction,
+            "gene_list": self.gene_list,
             "min_reads": self.min_reads,
             "min_samples": self.min_samples,
+            "min_counts": self.min_counts,
             "out_dir": self.out_dir,
             "core_path": str(CORE_R_PATH),
         }
@@ -374,8 +378,9 @@ def run_dea(counts_path: str, metadata_path: str, method: str,
             gsea_category: str = "H", gsea_subcategory: Optional[str] = None,
             min_reads: int = 10, min_samples: int = 3, 
             out_dir: Optional[str] = None, log_callback=None,
-            min_counts=0,
-            run_ora: bool = True, ora_direction: str = "all") -> RunResults:
+            min_counts=10,
+            run_ora: bool = True, ora_direction: str = "all",
+            gene_list: Optional[list] = None) -> RunResults:
 
     if ora_direction not in ("all", "up", "down"):
         raise ValueError(f"Invalid ora_direction: '{ora_direction}' (allowed: all, up, down).")
@@ -406,8 +411,10 @@ def run_dea(counts_path: str, metadata_path: str, method: str,
         gsea_subcategory=gsea_subcategory,
         run_ora=run_ora,
         ora_direction=ora_direction,
+        gene_list=[g for g in (gene_list or []) if str(g).strip()] or None,
         min_reads=min_reads,
         min_samples=min_samples,
+        min_counts=int(min_counts),
         out_dir=out_dir
     )
     
