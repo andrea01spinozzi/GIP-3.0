@@ -116,8 +116,38 @@ tryCatch({
                                  sample_col = cfg$sample_col,
                                  condition_col = cfg$condition_col)
 
+    # --- Optional gene filter: keep ONLY the genes typed by the user (case-insensitive match on the gene symbols).
+    gene_filter_active <- FALSE
+    if (length(cfg$gene_list) > 0) {
+      wanted <- unique(trimws(as.character(unlist(cfg$gene_list))))
+      wanted <- wanted[nzchar(wanted)]
+      hit <- match(toupper(wanted), toupper(rownames(counts)))
+      not_found <- wanted[is.na(hit)]
+      if (length(not_found) > 0) {
+        message(">>> [Note] Genes not found in the dataset (ignored): ",
+                paste(not_found, collapse = ", "))
+      }
+      hit <- unique(hit[!is.na(hit)])
+      if (length(hit) < 2) {
+        .fail(out_dir, paste0("At least 2 of the requested genes must be present in the dataset. ",
+                              "Found: ", length(hit), "."))
+      }
+      counts <- counts[hit, , drop = FALSE]
+      gene_filter_active <- TRUE
+      message(">>> Analysis restricted to ", nrow(counts), " genes.")
+    }
+
     # --- Exploratory PCA: we extract only the underlying data (p$data) and the axis labels so it can be redrawn interactively in Python.
-    p_pca <- plot_universal_pca(counts, metadata, title = "PCA of Count Data")
+    # With a single contrast, the PCA also uses only the 2 selected groups (with "pairwise_all" all groups are kept).
+    pca_counts <- counts
+    pca_meta <- metadata
+    if (!isTRUE(cfg$pairwise_all) && length(cfg$contrast) == 2) {
+      sel <- rownames(metadata)[as.character(metadata$condition) %in% as.character(cfg$contrast)]
+      sel <- intersect(sel, colnames(counts))
+      pca_counts <- counts[, sel, drop = FALSE]
+      pca_meta <- metadata[sel, , drop = FALSE]
+    }
+    p_pca <- plot_universal_pca(pca_counts, pca_meta, title = "PCA of Count Data")
     write.csv(p_pca$data, file.path(out_dir, "pca_data.csv"), row.names = FALSE)
     write(toJSON(list(x_label = p_pca$labels$x, y_label = p_pca$labels$y),
                  auto_unbox = TRUE),
@@ -133,13 +163,23 @@ tryCatch({
     run_one <- function(contrast, tag) {
       res_tbl <- run_differential_expression(counts, metadata,
                                               method = cfg$method,
-                                              contrast = contrast)
+                                              contrast = contrast,
+                                              min_counts = cfg$min_counts %||% 10)
       write.csv(res_tbl, file.path(out_dir, paste0("res_tbl_", tag, ".csv")),
                 row.names = FALSE)
 
       ranked <- generate_ranked_gene_table(res_tbl, padj_cutoff = padj_cutoff)
       write.csv(ranked, file.path(out_dir, paste0("ranked_", tag, ".csv")),
                 row.names = FALSE)
+
+      # With a user-defined gene list, ORA/GSEA are not meaningful (too few genes): they are skipped.
+      if (gene_filter_active) {
+        write(toJSON(list(available = FALSE, direction = cfg$ora_direction %||% "all",
+                          note = "ORA/GSEA skipped: analysis restricted to a user-defined gene list."),
+                     auto_unbox = TRUE),
+              file.path(out_dir, paste0("ora_meta_", tag, ".json")))
+        return(invisible(NULL))
+      }
 
       # --- ORA (Over-Representation Analysis) ---
       # Same cutoffs (padj / log2FC) and same MSigDB category as the GSEA.
