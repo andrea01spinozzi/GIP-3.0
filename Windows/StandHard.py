@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import csv
 import gzip
 import io
 import os
 import queue
+import re
 import subprocess
 import sys
+import tarfile
 import threading
+import time
 import tkinter as tk
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -214,6 +220,385 @@ def download_counts(file_id):
 
 
 # --------------------------------------------------------------------------
+#  LOGICA GEO (RNA-seq di ratto, tutte le malattie)
+# --------------------------------------------------------------------------
+# NB: NCBI genera i conteggi uniformi (pipeline unica) SOLO per umano e topo. Per il ratto
+# bisogna usare i file di conteggi caricati dagli autori di ogni studio (formati e ID dei geni
+# diversi da studio a studio): qui vengono riconosciuti automaticamente quelli più comuni.
+EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+GEO_FTP = "https://ftp.ncbi.nlm.nih.gov/geo/series"
+ORGANISM = "Rattus norvegicus"
+GEO_MAX_FILTER_VALUES = 40          # una caratteristica con più valori diversi non è un filtro utile
+DISEASE_HINTS = [
+    "", "diabetes", "obesity", "hypertension", "stroke", "ischemia", "myocardial infarction",
+    "heart failure", "Alzheimer", "Parkinson", "epilepsy", "depression", "spinal cord injury",
+    "traumatic brain injury", "neuropathic pain", "kidney injury", "fibrosis", "liver injury",
+    "NAFLD", "arthritis", "osteoporosis", "sepsis", "inflammation", "cancer", "pulmonary hypertension",
+]
+_GEO_MISSING = {"", "na", "n/a", "nan", "not available", "not reported", "not applicable",
+                "unknown", "--", "-"}
+_COUNT_COLS = ["count", "counts", "raw_count", "raw_counts", "readcount", "read_count",
+               "numreads", "expected_count", "unstranded", "htseq_count"]
+_SUPP_OK = re.compile(r"\.(txt|tsv|csv|tab|xlsx|xls|counts?)(\.gz)?$", re.I)
+_SUPP_BAD = re.compile(r"(?<![a-z])(fpkm|rpkm|tpm|cpm|normali[sz]ed|norm|rlog|vst|log2|degs?|diff\w*|"
+                       r"deseq2?_res\w*|filelist|readme|md5)(?![a-z])", re.I)
+
+_net_lock = threading.Lock()
+_last_eutils = [0.0]
+
+
+def _throttle_eutils():
+    """E-utilities: massimo ~3 richieste al secondo senza chiave API."""
+    with _net_lock:
+        wait = 0.35 - (time.time() - _last_eutils[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_eutils[0] = time.time()
+
+
+def geo_get(url, params=None, stream=False, timeout=(20, 120)):
+    last = "nessuna risposta"
+    for attempt in range(4):
+        try:
+            if url.startswith(EUTILS):
+                _throttle_eutils()
+            r = requests.get(url, params=params, timeout=timeout, stream=stream)
+            if r.status_code == 404:
+                raise FileNotFoundError(url)
+            if r.status_code in (429, 500, 502, 503, 504):
+                last = f"HTTP {r.status_code}"
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            return r
+        except FileNotFoundError:
+            raise
+        except requests.RequestException as e:
+            last = str(e)
+            time.sleep(1 + attempt)
+    raise RuntimeError(f"NCBI non raggiungibile ({last})")
+
+
+def search_geo_series(text, only_with_files=True, retmax=150):
+    """Cerca studi GEO RNA-seq di ratto. Ritorna ([{gse,title,n_samples,year,suppfile}], totale)."""
+    term = (f'"{ORGANISM}"[Organism] AND "expression profiling by high throughput sequencing"'
+            '[DataSet Type] AND gse[Entry Type]')
+    text = (text or "").strip()
+    if text:
+        term += f" AND ({text})"
+    r = geo_get(f"{EUTILS}/esearch.fcgi",
+                params={"db": "gds", "term": term, "retmax": retmax, "retmode": "json"})
+    res = r.json()["esearchresult"]
+    ids = res.get("idlist", [])
+    total = int(res.get("count", 0))
+    if not ids:
+        return [], total
+    r = geo_get(f"{EUTILS}/esummary.fcgi",
+                params={"db": "gds", "id": ",".join(ids), "retmode": "json"})
+    data = r.json()["result"]
+    rows = []
+    for uid in data.get("uids", []):
+        d = data[uid]
+        acc = str(d.get("accession", ""))
+        if not acc.startswith("GSE"):
+            continue
+        supp = str(d.get("suppfile", "") or "").strip()
+        if only_with_files and not supp:
+            continue
+        rows.append({"gse": acc, "title": str(d.get("title", "")),
+                     "n_samples": int(d.get("n_samples") or 0),
+                     "year": str(d.get("pdat", ""))[:4], "suppfile": supp})
+    rows.sort(key=lambda x: x["year"], reverse=True)
+    return rows, total
+
+
+def geo_series_url(gse):
+    num = gse[3:]
+    return f"{GEO_FTP}/GSE{num[:-3]}nnn/{gse}"
+
+
+def geo_list_dir(url):
+    """Nomi dei file in una cartella dell'FTP di GEO (lista vuota se la cartella non esiste)."""
+    try:
+        html = geo_get(url.rstrip("/") + "/").text
+    except FileNotFoundError:
+        return []
+    names = re.findall(r'href="([^"?#/][^"]*)"', html)
+    return [urllib.parse.unquote(n) for n in names
+            if not n.endswith("/") and not n.startswith(("http", "mailto"))]
+
+
+def _snake(key):
+    s = re.sub(r"[^0-9A-Za-z]+", "_", str(key)).strip("_").lower()
+    return s or "campo"
+
+
+def _clean_geo_value(v):
+    t = " ".join(str(v).replace("\t", " ").split())
+    return NA_LABEL if t.lower() in _GEO_MISSING else t
+
+
+def parse_series_matrix(text):
+    """Legge le righe !Sample_* di un file series_matrix. Ritorna (DataFrame, {colonna: nome originale}).
+    Colonne: gsm, title, source_name + una colonna per ogni caratteristica ('chiave: valore')."""
+    rows = {}
+    for line in text.splitlines():
+        if line.startswith("!series_matrix_table_begin"):
+            break
+        if not line.startswith("!Sample_"):
+            continue
+        parts = next(csv.reader([line], delimiter="\t", quotechar='"'))
+        rows.setdefault(parts[0][len("!Sample_"):], []).append(parts[1:])
+    gsm = [g.strip() for g in rows.get("geo_accession", [[]])[0]]
+    n = len(gsm)
+    if n == 0:
+        raise ValueError("il file series matrix non contiene campioni")
+
+    def first(key):
+        r = rows.get(key)
+        return ((r[0] if r else []) + [""] * n)[:n]
+
+    titles, sources = first("title"), first("source_name_ch1")
+    recs = [{"gsm": gsm[i], "title": titles[i].strip(), "source_name": sources[i].strip()}
+            for i in range(n)]
+    display = {"source_name": "source name"}
+    for row in rows.get("characteristics_ch1", []):
+        row = (row + [""] * n)[:n]
+        for i, cell in enumerate(row):
+            cell = cell.strip()
+            if not cell:
+                continue
+            k, v = cell.split(":", 1) if ":" in cell else ("characteristics", cell)
+            col = _snake(k)
+            if col in ("gsm", "title", "source_name"):
+                col += "_char"
+            display.setdefault(col, k.strip())
+            old = recs[i].get(col)
+            recs[i][col] = v.strip() if old is None else f"{old}; {v.strip()}"
+    df = pd.DataFrame(recs)
+    for c in df.columns:
+        if c not in ("gsm", "title"):
+            df[c] = df[c].map(_clean_geo_value)
+    return df, display
+
+
+def fetch_series_samples(gse):
+    """Scarica i metadati dei campioni di uno studio. Ritorna (DataFrame, {colonna: nome originale})."""
+    base = geo_series_url(gse)
+    names = [n for n in geo_list_dir(f"{base}/matrix") if n.endswith("series_matrix.txt.gz")]
+    if not names:
+        raise RuntimeError(f"{gse}: file dei metadati (series matrix) non trovato su GEO.")
+    frames, display = [], {}
+    for n in names:
+        raw = geo_get(f"{base}/matrix/{n}").content
+        df, disp = parse_series_matrix(gzip.decompress(raw).decode("utf-8", errors="replace"))
+        frames.append(df)
+        for k, v in disp.items():
+            display.setdefault(k, v)
+    df = pd.concat(frames, ignore_index=True).drop_duplicates("gsm").reset_index(drop=True)
+    for c in df.columns:
+        if c not in ("gsm", "title"):
+            df[c] = df[c].fillna(NA_LABEL)
+    return df, display
+
+
+def rank_counts_files(names):
+    """File supplementari ordinati per probabilità di contenere i conteggi grezzi: [(nome, punteggio)]."""
+    out = []
+    for n in names:
+        low = n.lower()
+        if low.endswith("_raw.tar"):
+            out.append((n, 4))          # un file per campione dentro il tar
+            continue
+        if not _SUPP_OK.search(low):
+            continue
+        score = 1
+        if "count" in low:
+            score += 10
+        if "raw" in low:
+            score += 3
+        if re.search(r"matrix|merged|all|gene", low):
+            score += 2
+        if _SUPP_BAD.search(low):
+            score -= 20                  # FPKM/TPM/normalizzati/risultati DE: non sono conteggi grezzi
+        out.append((n, score))
+    out.sort(key=lambda x: -x[1])
+    return out
+
+
+def download_bytes(url):
+    last = None
+    for _ in range(3):
+        try:
+            r = geo_get(url, stream=True, timeout=(20, 300))
+            buf = io.BytesIO()
+            for chunk in r.iter_content(1 << 20):
+                buf.write(chunk)
+            return buf.getvalue()
+        except FileNotFoundError:
+            raise
+        except Exception as e:
+            last = e
+            time.sleep(2)
+    raise RuntimeError(f"download non riuscito: {last}")
+
+
+def _read_table(name, raw):
+    """Legge un file di testo/Excel (anche .gz) in un DataFrame con intestazione."""
+    low = name.lower()
+    if low.endswith(".gz") or raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+        low = low[:-3] if low.endswith(".gz") else low
+    if low.endswith((".xlsx", ".xls")):
+        return pd.read_excel(io.BytesIO(raw), sheet_name=0)
+    lines = raw.decode("utf-8-sig", errors="replace").splitlines()
+    k = 0
+    while k < len(lines) and lines[k].startswith("#"):      # commenti (es. featureCounts)
+        k += 1
+    lines = lines[k:]
+    if not lines:
+        raise ValueError("file vuoto")
+    head = lines[0]
+    if low.endswith(".csv"):
+        sep = ","
+    elif "\t" in head:
+        sep = "\t"
+    elif ";" in head and "," not in head:
+        sep = ";"
+    elif "," in head:
+        sep = ","
+    else:
+        sep = r"\s+"
+    return pd.read_csv(io.StringIO("\n".join(lines)), sep=sep,
+                       engine="python" if sep == r"\s+" else "c")
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def match_columns(columns, samples):
+    """Abbina le colonne di una matrice ai campioni GEO. samples = [(gsm, titolo)].
+    Ritorna {gsm: nome colonna}. Regole (in ordine): codice GSM nel nome; titolo identico;
+    titolo contenuto nel nome (solo se l'abbinamento è univoco)."""
+    cols = [str(c) for c in columns]
+    gsms = {g for g, _ in samples}
+    mapping, used = {}, set()
+    for c in cols:
+        m = re.search(r"GSM\d+", c)
+        if m and m.group(0) in gsms and m.group(0) not in mapping:
+            mapping[m.group(0)] = c
+            used.add(c)
+    ncols = {c: _norm(c) for c in cols if c not in used}
+    for g, t in samples:
+        if g in mapping or not _norm(t):
+            continue
+        hit = [c for c, n in ncols.items() if n == _norm(t) and c not in used]
+        if len(hit) == 1:
+            mapping[g] = hit[0]
+            used.add(hit[0])
+    rest = [(g, _norm(t)) for g, t in samples if g not in mapping and len(_norm(t)) >= 3]
+    for g, nt in rest:
+        hit = [c for c, n in ncols.items() if c not in used and (nt in n or (len(n) >= 3 and n in nt))]
+        if len(hit) == 1:
+            n = ncols[hit[0]]
+            if not [g2 for g2, nt2 in rest if g2 != g and (nt2 in n or n in nt2)]:
+                mapping[g] = hit[0]
+                used.add(hit[0])
+    return mapping
+
+
+def counts_from_table(df, samples):
+    """Matrice geni × campioni (colonne = codici GSM) da una tabella con i geni nella prima colonna."""
+    df = df.copy()
+    df.columns = [str(c) for c in df.columns]
+    mapping = match_columns(list(df.columns[1:]), samples)
+    if not mapping:
+        raise ValueError("nessuna colonna del file corrisponde ai campioni (né per codice GSM né per "
+                         f"titolo). Prime colonne del file: {', '.join(list(df.columns[1:9]))}")
+    gene = df.iloc[:, 0].astype(str).str.strip()
+    sub = df[[mapping[g] for g in mapping]].apply(pd.to_numeric, errors="coerce")
+    sub.columns = list(mapping)
+    sub.index = gene
+    sub = sub[~sub.index.isin(["", "nan"])]
+    if sub.index.has_duplicates:
+        sub = sub.groupby(level=0, sort=False).sum(min_count=1)
+    return sub
+
+
+def parse_single_counts(name, raw):
+    """File di conteggi di un solo campione (HTSeq, STAR ReadsPerGene, tabella gene/conteggio)."""
+    if name.lower().endswith(".gz") or raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    lines = [l for l in raw.decode("utf-8", errors="replace").splitlines()
+             if l.strip() and not l.startswith("#")]
+    if not lines:
+        raise ValueError("file vuoto")
+    sep = "\t" if "\t" in lines[0] else ("," if "," in lines[0] else r"\s+")
+    df = pd.read_csv(io.StringIO("\n".join(lines)), sep=sep, header=None, dtype=str,
+                     engine="python" if sep == r"\s+" else "c")
+    first = df.iloc[0]
+    if pd.to_numeric(first.iloc[1:], errors="coerce").isna().all():      # riga di intestazione
+        names = [str(x).strip().lower() for x in first]
+        df = df.iloc[1:]
+        pick = next((names.index(c) for c in _COUNT_COLS if c in names[1:]), None)
+        if pick is None:
+            c2 = [i for i, n in enumerate(names) if i > 0 and "count" in n]
+            if c2:
+                pick = c2[0]
+            elif df.shape[1] == 2:
+                pick = 1
+            else:
+                raise ValueError("colonna dei conteggi non riconosciuta")
+    else:
+        pick = 1                                                          # senza intestazione
+    idx = df.iloc[:, 0].astype(str).str.strip()
+    s = pd.Series(pd.to_numeric(df.iloc[:, pick], errors="coerce").values, index=idx.values)
+    s = s[~s.index.str.startswith("__")
+          & ~s.index.isin(["N_unmapped", "N_multimapping", "N_noFeature", "N_ambiguous"])]
+    s = s.dropna()
+    if s.index.has_duplicates:
+        s = s.groupby(level=0, sort=False).sum()
+    return s
+
+
+def read_raw_tar(raw, samples):
+    """Estrae dal tar *_RAW.tar i file dei campioni richiesti. Ritorna (matrice, [errori])."""
+    wanted = {g for g, _ in samples}
+    series, errors = {}, []
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tf:
+        for m in tf:
+            if not m.isfile():
+                continue
+            h = re.search(r"GSM\d+", m.name)
+            if not h or h.group(0) not in wanted or h.group(0) in series:
+                continue
+            try:
+                series[h.group(0)] = parse_single_counts(m.name, tf.extractfile(m).read())
+            except Exception as e:
+                errors.append(f"{m.name}: {e}")
+    if not series:
+        raise ValueError("nel file .tar non ci sono file leggibili per i campioni scelti"
+                         + (f" ({errors[0]})" if errors else ""))
+    return pd.concat(series, axis=1), errors
+
+
+def fetch_series_counts(gse, fname, samples, log=None):
+    """Scarica e legge i conteggi di uno studio. Ritorna una matrice geni × campioni (colonne = GSM)."""
+    log = log or (lambda t: None)
+    url = f"{geo_series_url(gse)}/suppl/{urllib.parse.quote(fname)}"
+    log(f"  scarico {fname} ...")
+    raw = download_bytes(url)
+    log(f"  {len(raw) / 1e6:.1f} MB scaricati, leggo i conteggi...")
+    if fname.lower().endswith(".tar"):
+        counts, errors = read_raw_tar(raw, samples)
+        for e in errors[:5]:
+            log(f"  ! {e[:140]}")
+        return counts
+    return counts_from_table(_read_table(fname, raw), samples)
+
+
+# --------------------------------------------------------------------------
 #  TEMA GRAFICO (viola)
 # --------------------------------------------------------------------------
 PALETTE = {
@@ -321,6 +706,40 @@ HELP_CONTENT = {
 }
 
 
+HELP_CONTENT["geo"] = {
+    "title": "Aiuto — Dati di ratto da GEO",
+    "meaning": (
+        "GEO (Gene Expression Omnibus) è l'archivio pubblico dove i ricercatori depositano i loro "
+        "esperimenti di espressione genica. Con questa opzione cerchi studi RNA-seq sul ratto "
+        "(Rattus norvegicus) per QUALSIASI malattia, non solo i tumori.\n\n"
+        "Differenze rispetto al GDC, importanti da conoscere:\n"
+        "- Su GEO ogni studio è un progetto separato, con le sue etichette. Quindi prima si sceglie "
+        "UNO studio, poi si dividono i suoi campioni in gruppi (es. 'malato' e 'controllo') usando le "
+        "caratteristiche che gli autori hanno inserito (genotipo, trattamento, tessuto...).\n"
+        "- NCBI ricalcola i conteggi in modo uniforme solo per umano e topo, NON per il ratto. Qui "
+        "si usano quindi i file di conteggi caricati dagli autori: il programma riconosce i formati "
+        "più comuni, ma può capitare uno studio che non si riesce a leggere.\n"
+        "- Ogni studio può usare identificatori di gene diversi (simboli, Ensembl, Entrez). "
+        "Il programma lo segnala nel registro, ma non li converte.\n"
+        "- Le etichette dei campioni sono scritte dagli autori: controlla sempre che il filtro scelto "
+        "corrisponda davvero a ciò che intendi."
+    ),
+    "usage": (
+        "1. Scrivi una malattia o una parola chiave in inglese (o scegli un suggerimento) e premi 'Cerca'.\n"
+        "2. Seleziona uno studio dall'elenco (doppio clic o 'Usa lo studio selezionato'): guarda titolo e "
+        "numero di campioni.\n"
+        "3. Controlla 'File dei conteggi': deve essere un file di conteggi grezzi (raw counts), "
+        "non FPKM/TPM.\n"
+        "4. Usa i filtri per scegliere i campioni di un gruppo (es. 'treatment = vehicle'), poi "
+        "'Aggiungi come gruppo'. Cambia i filtri e aggiungi il secondo gruppo.\n"
+        "5. Prosegui con 'Avanti' come per il GDC.\n\n"
+        "Si possono unire gruppi di studi diversi solo se usano gli stessi identificatori di gene, "
+        "ma è sconsigliato: gli studi diversi hanno differenze tecniche (effetto batch) che si "
+        "confondono con la malattia. Per un confronto affidabile usa due gruppi dello stesso studio."
+    ),
+}
+
+
 def apply_theme(root: tk.Tk) -> ttk.Style:
     style = ttk.Style(root)
     try:
@@ -373,6 +792,10 @@ def apply_theme(root: tk.Tk) -> ttk.Style:
     style.map("Clear.TButton", background=[("active", "#f1d7d3")],
               foreground=[("active", P["err"])])
 
+    style.configure("TRadiobutton", background=P["bg"], foreground=P["accent"], font=FONT_BOLD)
+    style.map("TRadiobutton", background=[("active", P["bg"])])
+    style.configure("Card.TCheckbutton", background=P["bg_card"], foreground=P["text"], font=FONT_BASE)
+    style.map("Card.TCheckbutton", background=[("active", P["bg_card"])])
     style.configure("TNotebook", background=P["bg"], borderwidth=0, tabmargins=(8, 8, 8, 0))
     style.configure("TNotebook.Tab", background=P["accent_pale_2"], foreground=P["accent"],
                     padding=(20, 10), font=FONT_BOLD, borderwidth=0)
@@ -564,7 +987,7 @@ def open_folder(path):
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("GDC RNA-Seq Downloader")
+        root.title("RNA-Seq Downloader (GDC · GEO)")
         root.geometry("1120x820")
         root.minsize(980, 700)
         apply_theme(root)
@@ -578,6 +1001,16 @@ class App:
         self.vars, self.boxes = {}, {}
         self.total = 0
         self.groups = []
+        self.mode = tk.StringVar(value="gdc")           # "gdc" | "geo"
+        self._mode_prev = "gdc"
+        self.counter_txt = tk.StringVar(value="File trovati con i filtri attuali\n(1 file = 1 campione)")
+        self.geo_query = tk.StringVar()
+        self.geo_only_files = tk.BooleanVar(value=True)
+        self.geo_msg = tk.StringVar(value="Cerca uno studio per iniziare.")
+        self.geo_title_var = tk.StringVar(value="Nessuno studio caricato")
+        self.geo_file_var = tk.StringVar()
+        self.geo_series = None
+        self.geo_sel, self.geo_vars, self.geo_boxes, self.geo_maps = {}, {}, {}, {}
 
         self.cond_var = tk.StringVar()
         self.n_var = tk.IntVar(value=10)
@@ -625,13 +1058,13 @@ class App:
         inner.pack(fill=tk.X, padx=24, pady=(16, 14))
         row = tk.Frame(inner, bg=PALETTE["accent"])
         row.pack(fill="x", anchor="w")
-        tk.Label(row, text="GDC Downloader", font=("Trebuchet MS", 21, "bold"),
+        tk.Label(row, text="RNA-Seq Downloader", font=("Trebuchet MS", 21, "bold"),
                  fg="white", bg=PALETTE["accent"]).pack(side=tk.LEFT)
-        tk.Label(row, text=" RNA-Seq ", font=("Trebuchet MS", 9, "bold"),
+        tk.Label(row, text=" GDC · GEO ", font=("Trebuchet MS", 9, "bold"),
                  fg=PALETTE["accent"], bg=PALETTE["accent_soft"], padx=2
                  ).pack(side=tk.LEFT, padx=(10, 0), pady=(4, 0))
-        tk.Label(inner, text="Scarica e unisci i dati RNA-Seq (STAR - Counts) del Genomic Data "
-                             "Commons in 3 semplici passi",
+        tk.Label(inner, text="Scarica e unisci dati RNA-Seq: tumori umani dal GDC, oppure ratto "
+                             "(tutte le malattie) da GEO, in 3 semplici passi",
                  font=("Trebuchet MS", 11), fg=PALETTE["accent_pale"],
                  bg=PALETTE["accent"]).pack(fill="x", anchor="w", pady=(4, 0))
         tk.Frame(self.root, bg=PALETTE["accent_soft"], height=3).pack(side=tk.TOP, fill=tk.X)
@@ -654,6 +1087,13 @@ class App:
                        "Il numero tra parentesi quadre indica quanti file esistono per ogni voce.",
                     "filtri")
 
+        src = ttk.Frame(f)
+        src.pack(fill=tk.X, padx=12, pady=(4, 0))
+        ttk.Label(src, text="Origine dei dati:", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 10))
+        for text, val in [("Tumori umani · GDC", "gdc"), ("Ratto, tutte le malattie · GEO", "geo")]:
+            ttk.Radiobutton(src, text=text, value=val, variable=self.mode,
+                            command=self._switch_source).pack(side=tk.LEFT, padx=(0, 18))
+
         # contatore grande
         counter = tk.Frame(f, bg=PALETTE["accent_pale_2"], highlightthickness=1,
                            highlightbackground=PALETTE["border_strong"])
@@ -662,26 +1102,29 @@ class App:
                  fg=PALETTE["accent"]).pack(side=tk.LEFT, padx=(18, 8), pady=8)
         tk.Label(counter, textvariable=self.total_var, font=FONT_BIG,
                  bg=PALETTE["accent_pale_2"], fg=PALETTE["accent"]).pack(side=tk.LEFT)
-        tk.Label(counter, text="File trovati con i filtri attuali\n(1 file = 1 campione)",
+        tk.Label(counter, textvariable=self.counter_txt,
                  font=FONT_BASE, justify="left", bg=PALETTE["accent_pale_2"],
                  fg=PALETTE["text"]).pack(side=tk.LEFT, padx=14)
         reset = ttk.Button(counter, text="↺ Azzera tutti i filtri", command=self.reset)
         reset.pack(side=tk.RIGHT, padx=18)
         add_tip(reset, "Riporta tutti i menu su '(qualsiasi)'.")
 
-        basic = ttk.LabelFrame(f, text="Filtri principali")
+        self.gdc_frame = ttk.Frame(f)
+        basic = ttk.LabelFrame(self.gdc_frame, text="Filtri principali")
         basic.pack(fill=tk.X, padx=12, pady=8)
         self._fill_filters(basic, [x for x in FACETS if not x[3]])
 
         self.adv_open = False
-        self.adv_btn = ttk.Button(f, text="▸ Mostra filtri avanzati", command=self._toggle_adv)
+        self.adv_btn = ttk.Button(self.gdc_frame, text="▸ Mostra filtri avanzati", command=self._toggle_adv)
         self.adv_btn.pack(anchor="w", padx=12, pady=(2, 4))
-        self.adv_frame = ttk.LabelFrame(f, text="Filtri avanzati")
+        self.adv_frame = ttk.LabelFrame(self.gdc_frame, text="Filtri avanzati")
         self._fill_filters(self.adv_frame, [x for x in FACETS if x[3]])
+        self._build_geo_panel(f)
 
         add = ttk.LabelFrame(f, text="Aggiungi questa selezione come gruppo")
         add.pack(fill=tk.X, padx=12, pady=8)
         self.add_frame = add
+        self.gdc_frame.pack(fill=tk.X, before=add)
         row = ttk.Frame(add, style="Card.TFrame")
         row.pack(fill=tk.X, padx=12, pady=(10, 6))
         ttk.Label(row, text="Nome del gruppo (facoltativo):", style="Card.TLabel"
@@ -743,7 +1186,7 @@ class App:
     def _toggle_adv(self):
         self.adv_open = not self.adv_open
         if self.adv_open:
-            self.adv_frame.pack(fill=tk.X, padx=12, pady=8, before=self.add_frame)
+            self.adv_frame.pack(fill=tk.X, padx=12, pady=8, after=self.adv_btn)
             self.adv_btn.config(text="▾ Nascondi filtri avanzati")
         else:
             self.adv_frame.pack_forget()
@@ -835,6 +1278,238 @@ class App:
         ttk.Button(nav, text="⬅ Indietro", command=lambda: self.nb.select(self.tab_groups)
                    ).pack(side=tk.LEFT)
 
+    # ---------------- origine dati: GDC / GEO ----------------
+    def _switch_source(self):
+        new = self.mode.get()
+        if new == self._mode_prev:
+            return
+        if self.groups and not messagebox.askyesno(
+                "Cambia origine dei dati",
+                "Cambiando origine i gruppi già aggiunti verranno eliminati.\nVuoi continuare?"):
+            self.mode.set(self._mode_prev)
+            return
+        self.groups.clear()
+        self._redraw()
+        self._mode_prev = new
+        self.gen += 1                                   # scarta le risposte GDC ancora in arrivo
+        if new == "geo":
+            self.gdc_frame.pack_forget()
+            self.geo_frame.pack(fill=tk.X, padx=12, pady=8, before=self.add_frame)
+            self.counter_txt.set("Campioni dello studio con i filtri attuali\n(1 campione = 1 animale/prelievo)")
+            self.status_var.set("Origine: GEO (ratto). Cerca uno studio e caricalo.")
+            self._geo_refresh_filters()
+        else:
+            self.geo_frame.pack_forget()
+            self.gdc_frame.pack(fill=tk.X, before=self.add_frame)
+            self.counter_txt.set("File trovati con i filtri attuali\n(1 file = 1 campione)")
+            self.refresh()
+
+    # ---------------- GEO: pannello ----------------
+    def _build_geo_panel(self, parent):
+        self.geo_frame = ttk.Frame(parent)
+        a = ttk.LabelFrame(self.geo_frame, text="A · Cerca uno studio sul ratto")
+        a.pack(fill=tk.X, pady=(0, 8))
+        row = ttk.Frame(a, style="Card.TFrame")
+        row.pack(fill=tk.X, padx=12, pady=(10, 4))
+        ttk.Label(row, text="Malattia o parola chiave:", style="Card.TLabel").pack(side=tk.LEFT)
+        cb = ttk.Combobox(row, textvariable=self.geo_query, values=DISEASE_HINTS, width=34)
+        cb.pack(side=tk.LEFT, padx=8)
+        cb.bind("<Return>", lambda e: self.geo_search())
+        self._no_wheel(cb)
+        add_tip(cb, "Scrivi una malattia, un tessuto o un trattamento (in inglese, es. 'diabetes', "
+                    "'liver fibrosis') oppure scegli un suggerimento. Vuoto = tutti gli studi sul ratto.")
+        go = ttk.Button(row, text="🔍 Cerca", style="Accent.TButton", command=self.geo_search)
+        go.pack(side=tk.LEFT)
+        self._help_button(row, "geo").pack(side=tk.RIGHT)
+        ttk.Checkbutton(a, text="Mostra solo studi con file supplementari (dove stanno i conteggi)",
+                        variable=self.geo_only_files, style="Card.TCheckbutton"
+                        ).pack(anchor="w", padx=12, pady=(0, 4))
+
+        tf = ttk.Frame(a, style="Card.TFrame")
+        tf.pack(fill=tk.X, padx=12, pady=4)
+        self.geo_tree = ttk.Treeview(tf, columns=("gse", "year", "n", "title"), show="headings",
+                                     height=7, selectmode="browse")
+        for c, t, w, anc in [("gse", "Studio", 100, "w"), ("year", "Anno", 60, "center"),
+                             ("n", "Campioni", 80, "center"), ("title", "Titolo", 620, "w")]:
+            self.geo_tree.heading(c, text=t)
+            self.geo_tree.column(c, width=w, anchor=anc)
+        sb = ttk.Scrollbar(tf, orient="vertical", command=self.geo_tree.yview)
+        self.geo_tree.configure(yscrollcommand=sb.set)
+        self.geo_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        sb.pack(side=tk.LEFT, fill=tk.Y)
+        self.geo_tree.bind("<Double-1>", lambda e: self.geo_load())
+
+        brow = ttk.Frame(a, style="Card.TFrame")
+        brow.pack(fill=tk.X, padx=12, pady=(4, 12))
+        ttk.Button(brow, text="Usa lo studio selezionato ➜", command=self.geo_load).pack(side=tk.LEFT)
+        ttk.Label(brow, textvariable=self.geo_msg, style="CardMuted.TLabel", wraplength=640,
+                  justify="left").pack(side=tk.LEFT, padx=12)
+
+        b = ttk.LabelFrame(self.geo_frame, text="B · Scegli i campioni dello studio")
+        b.pack(fill=tk.X)
+        ttk.Label(b, textvariable=self.geo_title_var, style="CardBold.TLabel", wraplength=900,
+                  justify="left").pack(anchor="w", padx=12, pady=(10, 4))
+        frow = ttk.Frame(b, style="Card.TFrame")
+        frow.pack(fill=tk.X, padx=12, pady=4)
+        ttk.Label(frow, text="File dei conteggi:", style="Card.TLabel").pack(side=tk.LEFT)
+        self.geo_file_cb = ttk.Combobox(frow, textvariable=self.geo_file_var, state="readonly", width=60)
+        self.geo_file_cb.pack(side=tk.LEFT, padx=8)
+        self._no_wheel(self.geo_file_cb)
+        add_tip(self.geo_file_cb, "File supplementare dello studio che contiene i conteggi grezzi. "
+                                  "Il programma sceglie quello più probabile: cambialo solo se serve.")
+        self.geo_filters_frame = ttk.Frame(b, style="Card.TFrame")
+        self.geo_filters_frame.pack(fill=tk.X, padx=4, pady=(4, 10))
+        ttk.Label(self.geo_filters_frame, text="Carica prima uno studio (passo A).",
+                  style="CardMuted.TLabel").pack(anchor="w", padx=10, pady=8)
+
+    def geo_search(self):
+        q, only = self.geo_query.get().strip(), bool(self.geo_only_files.get())
+        self.geo_msg.set("Cerco su GEO...")
+        self.status_var.set("Ricerca su GEO in corso...")
+
+        def job():
+            try:
+                self.q.put(("geo_results", 0, None, search_geo_series(q, only)))
+            except Exception as e:
+                self.q.put(("geo_err", 0, None, f"Ricerca non riuscita: {e}"))
+        threading.Thread(target=job, daemon=True).start()
+
+    def geo_load(self):
+        sel = self.geo_tree.selection()
+        if not sel:
+            messagebox.showinfo("Seleziona uno studio", "Clicca prima su una riga dell'elenco.")
+            return
+        gse, title = sel[0], self.geo_tree.set(sel[0], "title")
+        self.geo_msg.set(f"Carico {gse}...")
+        self.status_var.set(f"Carico i metadati di {gse}...")
+
+        def job():
+            try:
+                df, display = fetch_series_samples(gse)
+                try:
+                    files = rank_counts_files(geo_list_dir(f"{geo_series_url(gse)}/suppl"))
+                except Exception:
+                    files = []
+                self.q.put(("geo_series", 0, None, {"gse": gse, "title": title, "samples": df,
+                                                     "display": display, "files": files}))
+            except Exception as e:
+                self.q.put(("geo_err", 0, None, f"Impossibile caricare {gse}: {e}"))
+        threading.Thread(target=job, daemon=True).start()
+
+    def _geo_show_results(self, payload):
+        rows, total = payload
+        self.geo_tree.delete(*self.geo_tree.get_children())
+        for r in rows:
+            self.geo_tree.insert("", "end", iid=r["gse"], values=(r["gse"], r["year"], r["n_samples"], r["title"]))
+        if rows:
+            self.geo_msg.set(f"{len(rows)} studi mostrati su {total} trovati. Selezionane uno "
+                             "(doppio clic o 'Usa lo studio selezionato').")
+        else:
+            self.geo_msg.set("Nessuno studio trovato: prova un'altra parola chiave (in inglese).")
+        self.status_var.set("Ricerca GEO completata.")
+
+    def _geo_apply_series(self, p):
+        df, display, files = p["samples"], p["display"], p["files"]
+        meta_cols = [c for c in df.columns if c not in ("gsm", "title")]
+        fcols = [c for c in meta_cols if 2 <= df[c].nunique() <= GEO_MAX_FILTER_VALUES]
+        self.geo_series = {"gse": p["gse"], "title": p["title"], "samples": df, "display": display,
+                           "meta_cols": meta_cols, "filter_cols": fcols}
+        names = [n for n, _ in files]
+        self.geo_file_cb["values"] = names
+        self.geo_file_var.set(names[0] if names else "")
+        self.geo_title_var.set(f"{p['gse']} — {p['title']}  ({len(df)} campioni)")
+        note = f"{p['gse']} caricato."
+        if not files:
+            note += " ⚠ Nessun file di conteggi riconoscibile tra i supplementari."
+        elif files[0][1] <= 0:
+            note += " ⚠ I file supplementari sembrano normalizzati (FPKM/TPM) o non di conteggi: controlla la scelta."
+        self.geo_msg.set(note)
+        self.status_var.set(note)
+        self._geo_build_filters()
+        self._geo_refresh_filters()
+
+    def _geo_build_filters(self):
+        for w in self.geo_filters_frame.winfo_children():
+            w.destroy()
+        s = self.geo_series
+        self.geo_sel = {c: None for c in s["filter_cols"]}
+        self.geo_vars, self.geo_boxes, self.geo_maps = {}, {}, {}
+        if not s["filter_cols"]:
+            ttk.Label(self.geo_filters_frame, style="CardMuted.TLabel",
+                      text="Nessuna caratteristica utile per filtrare: puoi aggiungere tutti i campioni "
+                           "dello studio come un unico gruppo.").pack(anchor="w", padx=10, pady=8)
+            return
+        grid = ttk.Frame(self.geo_filters_frame, style="Card.TFrame")
+        grid.pack(fill=tk.X, padx=8)
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+        for i, col in enumerate(s["filter_cols"]):
+            r, c = divmod(i, 2)
+            cell = ttk.Frame(grid, style="Card.TFrame")
+            cell.grid(row=r, column=c, sticky="ew", padx=8, pady=6)
+            ttk.Label(cell, text=s["display"].get(col, col), style="CardBold.TLabel").pack(anchor="w")
+            line = ttk.Frame(cell, style="Card.TFrame")
+            line.pack(fill=tk.X, pady=(2, 0))
+            var = tk.StringVar(value=ANY)
+            cb = ttk.Combobox(line, textvariable=var, values=[ANY], state="readonly")
+            cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            cb.bind("<<ComboboxSelected>>", lambda e, k=col: self._geo_on_select(k))
+            self._no_wheel(cb)
+            clr = ttk.Button(line, text="✕", style="Clear.TButton", width=3,
+                             command=lambda k=col: self._geo_clear_one(k))
+            clr.pack(side=tk.LEFT, padx=(4, 0))
+            add_tip(clr, "Azzera questo filtro")
+            self.geo_vars[col], self.geo_boxes[col] = var, cb
+
+    def _geo_on_select(self, col):
+        label = self.geo_vars[col].get()
+        self.geo_sel[col] = None if label == ANY else self.geo_maps[col].get(label)
+        self._geo_refresh_filters()
+
+    def _geo_clear_one(self, col):
+        self.geo_sel[col] = None
+        self.geo_vars[col].set(ANY)
+        self._geo_refresh_filters()
+
+    def _geo_subset(self, exclude=None):
+        df = self.geo_series["samples"]
+        mask = pd.Series(True, index=df.index)
+        for col, val in self.geo_sel.items():
+            if val is not None and col != exclude:
+                mask &= df[col] == val
+        return df[mask]
+
+    def _geo_refresh_filters(self):
+        s = self.geo_series
+        if not s:
+            self.total = 0
+            self.total_var.set("—")
+            return
+        for _ in range(len(s["filter_cols"]) + 1):          # una scelta può diventare non valida
+            changed = False
+            for col in s["filter_cols"]:
+                counts = self._geo_subset(exclude=col)[col].value_counts()
+                mapping = {f"{k}  [{n}]": k for k, n in counts.items()}
+                self.geo_maps[col] = mapping
+                self.geo_boxes[col]["values"] = [ANY] + list(mapping)
+                cur = self.geo_sel[col]
+                if cur is None:
+                    self.geo_vars[col].set(ANY)
+                    continue
+                lab = next((l for l, v in mapping.items() if v == cur), None)
+                if lab:
+                    self.geo_vars[col].set(lab)
+                else:
+                    self.geo_sel[col] = None
+                    self.geo_vars[col].set(ANY)
+                    changed = True
+            if not changed:
+                break
+        n = len(self._geo_subset())
+        self.total = n
+        self.total_var.set(f"{n:,}".replace(",", "."))
+        self.status_var.set(f"Campioni di {s['gse']} corrispondenti ai filtri: {n}")
+
     # ---------------- aiuto ----------------
     def _show_help(self, key):
         content = HELP_CONTENT[key]
@@ -878,6 +1553,12 @@ class App:
         self.refresh()
 
     def reset(self):
+        if self.mode.get() == "geo":
+            for c in self.geo_sel:
+                self.geo_sel[c] = None
+                self.geo_vars[c].set(ANY)
+            self._geo_refresh_filters()
+            return
         for f in self.sel:
             self.sel[f] = None
             self.vars[f].set(ANY)
@@ -934,6 +1615,13 @@ class App:
                     self.status_var.set("Si è verificato un errore.")
                     self._log("ERRORE: " + payload)
                     messagebox.showerror("Errore", payload)
+                elif kind == "geo_results":
+                    self._geo_show_results(payload)
+                elif kind == "geo_series":
+                    self._geo_apply_series(payload)
+                elif kind == "geo_err":
+                    self.geo_msg.set("⚠ " + payload)
+                    self.status_var.set(payload[:140])
                 elif g != self.gen:
                     continue
                 elif kind == "facet":
@@ -972,19 +1660,39 @@ class App:
     # ---------------- gruppi ----------------
     def add_group(self):
         if self.total <= 0:
-            messagebox.showwarning("Nessun dato", "Nessun file corrisponde ai filtri correnti.\n"
+            messagebox.showwarning("Nessun dato", "Nessun campione corrisponde ai filtri correnti.\n"
                                                   "Prova ad azzerare qualche filtro.")
             return
-        chosen = {f: v for f, v in self.sel.items() if v}
-        desc = "; ".join(f"{LABEL[f]} = {v}" for f, v in chosen.items()) or "nessun filtro"
-        name = self.cond_var.get().strip() or " | ".join(chosen.values()) or "Tutti"
+        extra = {}
+        if self.mode.get() == "geo":
+            s = self.geo_series
+            if not s:
+                messagebox.showwarning("Nessuno studio", "Carica prima uno studio (passo A).")
+                return
+            if not self.geo_file_var.get():
+                messagebox.showwarning("File dei conteggi", "Per questo studio non c'è nessun file di "
+                                       "conteggi riconosciuto: non si possono scaricare i dati.")
+                return
+            sub = self._geo_subset()
+            chosen = {s["display"].get(c, c): v for c, v in self.geo_sel.items() if v}
+            desc = f"{s['gse']}: " + ("; ".join(f"{k} = {v}" for k, v in chosen.items()) or "tutti i campioni")
+            default_name = " | ".join(chosen.values()) or s["gse"]
+            rows = [{"gsm": r["gsm"], "title": r["title"], "source_name": r["source_name"],
+                     "meta": {c: r[c] for c in s["meta_cols"]}} for _, r in sub.iterrows()]
+            extra = {"source": "geo", "gse": s["gse"], "file": self.geo_file_var.get(),
+                     "rows": rows, "desc": desc}
+        else:
+            chosen = {f: v for f, v in self.sel.items() if v}
+            default_name = " | ".join(chosen.values()) or "Tutti"
+            extra = {"source": "gdc", "sel": chosen}
+        name = self.cond_var.get().strip() or default_name
         try:
             n = int(self.n_var.get())
         except (tk.TclError, ValueError):
             messagebox.showwarning("Numero non valido", "Scrivi un numero intero in 'Quanti campioni'.")
             return
         n = max(1, min(n, self.total))
-        self.groups.append({"cond": name, "sel": chosen, "disp": self.total, "n": n})
+        self.groups.append({"cond": name, "disp": self.total, "n": n, **extra})
         self._redraw()
         self.cond_var.set("")
         self.status_var.set(f"Gruppo '{name}' aggiunto ({n} campioni). Puoi cambiare i filtri e "
@@ -993,7 +1701,7 @@ class App:
     def _redraw(self):
         self.tree.delete(*self.tree.get_children())
         for i, g in enumerate(self.groups):
-            desc = "; ".join(f"{LABEL[f]} = {v}" for f, v in g["sel"].items()) or "nessun filtro"
+            desc = g.get("desc") or "; ".join(f"{LABEL[f]} = {v}" for f, v in g["sel"].items()) or "nessun filtro"
             self.tree.insert("", "end", iid=str(i), values=(g["cond"], desc, g["disp"], g["n"]))
         self._update_checks()
 
@@ -1092,8 +1800,8 @@ class App:
         self.msg.config(text="Seleziono i file...")
         self.status_var.set("Seleziono i file da scaricare...")
         self._log("— Avvio —")
-        threading.Thread(target=self._download, args=(list(self.groups), outdir),
-                         daemon=True).start()
+        target = self._download_geo if self.mode.get() == "geo" else self._download
+        threading.Thread(target=target, args=(list(self.groups), outdir), daemon=True).start()
 
     def _download(self, groups, outdir):
         log = lambda t: self.q.put(("log", 0, None, t))
@@ -1159,6 +1867,118 @@ class App:
                 txt += " (nessuna informazione clinica disponibile per questi campioni)"
             if errors:
                 txt += f"\n\n{len(errors)} file non scaricati."
+            self.q.put(("done", 0, None, txt))
+        except Exception as e:
+            self.q.put(("fail", 0, None, str(e)))
+
+    def _download_geo(self, groups, outdir):
+        log = lambda t: self.q.put(("log", 0, None, t))
+        try:
+            log("Origine: GEO (ratto). I conteggi sono quelli caricati dagli autori di ogni studio.")
+            chosen, seen = [], set()
+            for g in groups:
+                taken = 0
+                for row in g["rows"]:
+                    if taken >= g["n"]:
+                        break
+                    key = (g["gse"], row["gsm"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    chosen.append({**row, "cond": g["cond"], "gse": g["gse"], "file": g["file"]})
+                    taken += 1
+                log(f"Gruppo '{g['cond']}': {taken} campioni di {g['gse']}")
+            if not chosen:
+                raise RuntimeError("Nessun campione selezionato.")
+
+            batches = {}
+            for c in chosen:
+                batches.setdefault((c["gse"], c["file"]), []).append(c)
+            mats, ok = [], []
+            for i, ((gse, fname), items) in enumerate(batches.items(), 1):
+                log(f"Studio {gse}: {len(items)} campioni")
+                if not fname:
+                    raise RuntimeError(f"{gse}: nessun file di conteggi scelto (passo 1, 'File dei conteggi').")
+                try:
+                    counts = fetch_series_counts(gse, fname, [(c["gsm"], c["title"]) for c in items], log)
+                except Exception as e:
+                    raise RuntimeError(f"{gse} / {fname}: {e}")
+                got = [c for c in items if c["gsm"] in counts.columns]
+                lost = [c["gsm"] for c in items if c["gsm"] not in counts.columns]
+                if lost:
+                    log(f"  ! {len(lost)} campioni non trovati nel file e scartati: {', '.join(lost[:8])}"
+                        + (" ..." if len(lost) > 8 else ""))
+                if not got:
+                    raise RuntimeError(f"{gse}: nessun campione scelto è presente nel file {fname}.")
+                mats.append(counts[[c["gsm"] for c in got]])
+                ok += got
+                self.q.put(("prog", i, len(batches), None))
+
+            warnings = []
+            if len(mats) > 1:
+                common = mats[0].index
+                for m in mats[1:]:
+                    common = common.intersection(m.index)
+                if len(common) < 0.5 * min(len(m) for m in mats):
+                    raise RuntimeError(
+                        "Gli studi scelti usano identificatori di gene diversi (es. Ensembl e simboli) "
+                        f"e hanno solo {len(common)} geni in comune: non possono essere uniti. "
+                        "Usa gruppi dello stesso studio.")
+                log(f"Unisco {len(mats)} studi sui {len(common)} geni in comune.")
+                warnings.append("i gruppi vengono da studi diversi: attenzione all'effetto batch")
+                counts = pd.concat([m.loc[common] for m in mats], axis=1)
+            else:
+                counts = mats[0]
+            counts = counts.fillna(0)
+            by_gsm = {c["gsm"]: c for c in ok}
+            ok = [by_gsm[g] for g in counts.columns]
+
+            arr = counts.to_numpy(dtype=float)
+            if (arr < 0).any():
+                warnings.append("ci sono valori negativi (dati trasformati, non conteggi grezzi)")
+            frac = float((np.mod(arr, 1) != 0).mean())
+            if frac > 0.001:
+                warnings.append(f"{frac:.1%} dei valori ha decimali: potrebbero essere FPKM/TPM o stime "
+                                "RSEM, non conteggi grezzi")
+            for w in warnings:
+                log(f"  ⚠ {w}")
+            log("Esempio di ID gene: " + ", ".join(map(str, counts.index[:3])))
+
+            log("Unisco i dati e salvo i file...")
+            n = len(ok)
+            base_cols = ["sample_id", "original_barcode", "condition", "case_id", "sample_type", "file_id"]
+            meta = pd.DataFrame({
+                "sample_id": [f"S{i}" for i in range(1, n + 1)],
+                "original_barcode": [c["gsm"] for c in ok],
+                "condition": [c["cond"] for c in ok],
+                "case_id": [c["title"] for c in ok],
+                "sample_type": [c.get("source_name") or NA_LABEL for c in ok],
+                "file_id": [f"{c['gse']}/{c['file']}" for c in ok],
+                "series": [c["gse"] for c in ok],
+            })
+            extra = pd.DataFrame([c["meta"] for c in ok])
+            kept = []
+            for col in extra.columns:
+                if col == "source_name":
+                    continue
+                s = extra[col].fillna(NA_LABEL)
+                if (s == NA_LABEL).all():
+                    continue
+                name = col + "_geo" if col in base_cols + ["series"] else col
+                meta[name] = s.values
+                kept.append(name)
+            counts.columns = meta["sample_id"].tolist()
+            counts.index.name = "gene_id"
+
+            counts.reset_index().to_csv(os.path.join(outdir, "counts_matrix_unito.tsv"),
+                                        sep="\t", index=False)
+            meta.to_csv(os.path.join(outdir, "metadata_unito.tsv"), sep="\t", index=False)
+            txt = (f"Salvati in {outdir}:\n"
+                   f"- counts_matrix_unito.tsv ({counts.shape[0]} geni × {n} sample)\n"
+                   f"- metadata_unito.tsv (con le colonne: series"
+                   + (f", {', '.join(kept)}" if kept else "") + ")")
+            if warnings:
+                txt += "\n\nAttenzione:\n- " + "\n- ".join(warnings)
             self.q.put(("done", 0, None, txt))
         except Exception as e:
             self.q.put(("fail", 0, None, str(e)))
