@@ -35,6 +35,7 @@ except ImportError:
 
 import core_calcolo as engine
 import pca_coloring as pcol
+import gene_plots as gplot
 import report_pdf
 
 
@@ -401,6 +402,36 @@ HELP_CONTENT = {
             "fewer than 5 genes passing the cutoffs, or ORA disabled in Setup).\n\n"
             "Manual annotations and high-resolution export: identical to those "
             "described for the PCA tab."
+        ),
+    },
+    "genes": {
+        "title": "Help — Gene counts",
+        "meaning": (
+            "This tab shows how much a single gene is expressed in EACH sample and relates it to the "
+            "metadata of the samples (age, sex, tumor stage, batch...). Every point is a sample.\n\n"
+            "The X axis is the normalized expression of the gene: log2(counts normalized for sequencing "
+            "depth + 1) for RNA-seq, or the already normalized log2 values for microarray (the exact "
+            "scale is written on the axis). These values are for exploration only: the differential "
+            "expression results come from the statistical model fitted on the raw counts.\n\n"
+            "- Numeric metadata (e.g. age): dot plot with Spearman's rank correlation (rho and p-value).\n"
+            "- Text metadata (e.g. sex, stage): one box per group with the samples as points; "
+            "Mann-Whitney U test for 2 groups, Kruskal-Wallis for 3 or more."
+        ),
+        "usage": (
+            "- 'Gene': type a gene symbol (case does not matter) and press 'Plot' or Enter. If the gene is "
+            "missing, similar names are suggested; genes removed by the low-counts filter are not available.\n"
+            "- 'Metadata (Y axis)' and 'Type': the metadata column to compare; 'Auto' recognizes numeric vs "
+            "text columns, or force the type.\n"
+            "- 'Color points by': paints the points with ANOTHER metadata column (e.g. plot expression vs age "
+            "and color by sex or by condition). Numeric columns get a color scale with a color bar, text "
+            "columns one color per group; missing values ('not available', empty...) are grey.\n"
+            "- 'Scale' and 'Color-blind-friendly palette': choose the numeric color scale / the Okabe-Ito "
+            "palette for groups.\n"
+            "- 'Show sample labels', 'Linear trend line', 'Custom title': cosmetic options.\n"
+            "- 'Export plot data CSV...': saves the values behind the chart.\n"
+            "- p-values need the Python package 'scipy' (pip install scipy); without it the charts are drawn "
+            "but the test results are not shown.\n\n"
+            "Manual annotations and high-resolution export: identical to those described for the PCA tab."
         ),
     },
     "log": {
@@ -1170,6 +1201,7 @@ class DEAApp(ttk.Frame):
         self.condition_col = tk.StringVar(value="3")
         self.gene_list_var = tk.StringVar(value="")   # comma-separated genes (empty = all genes)
         self.method = tk.StringVar(value="RNAseq")
+        self.species_display = tk.StringVar(value=next(iter(engine.SPECIES_CHOICES)))   # Human by default
         self.pairwise_all = tk.BooleanVar(value=False)
         self.padj_cutoff = tk.DoubleVar(value=0.05)
         self.lfc_cutoff = tk.DoubleVar(value=1.0)
@@ -1187,6 +1219,19 @@ class DEAApp(ttk.Frame):
         self.pca_cmap = tk.StringVar(value="Red → Blue")
         self._pca_colorbar = None
         self._meta_cache = (None, None, None)   # (path, mtime, DataFrame)
+
+        # Gene counts tab (expression of one gene in every sample vs a metadata column)
+        self.gene_plot_gene = tk.StringVar(value="")
+        self.gene_plot_var = tk.StringVar(value="")                 # metadata column on the Y axis
+        self.gene_plot_kind = tk.StringVar(value="Auto")
+        self.gene_plot_color_col = tk.StringVar(value=gplot.NO_COLOR)
+        self.gene_plot_color_kind = tk.StringVar(value="Auto")
+        self.gene_plot_cmap = tk.StringVar(value="Red → Blue")
+        self.gene_plot_colorblind = tk.BooleanVar(value=False)
+        self.gene_plot_labels = tk.BooleanVar(value=False)
+        self.gene_plot_trend = tk.BooleanVar(value=False)
+        self.gene_plot_title_var = tk.StringVar(value="")
+        self._gene_colorbar = None
 
         self.volcano_label_mode_display = tk.StringVar(value=self.LABEL_MODE_DISPLAY[0])
         self.volcano_label_topn = tk.IntVar(value=15)
@@ -1299,6 +1344,7 @@ class DEAApp(ttk.Frame):
         self.tab_table = ttk.Frame(self.notebook)
         self.tab_gsea = ttk.Frame(self.notebook)
         self.tab_ora = ttk.Frame(self.notebook)
+        self.tab_genes = ttk.Frame(self.notebook)
         self.tab_log = ttk.Frame(self.notebook)
 
         self.notebook.add(self.tab_setup, text="1 · Setup & Parameters")
@@ -1307,6 +1353,7 @@ class DEAApp(ttk.Frame):
         self.notebook.add(self.tab_table, text="4 · Gene Table")
         self.notebook.add(self.tab_gsea, text="5 · GSEA / Pathway")
         self.notebook.add(self.tab_ora, text="6 · ORA / Over-representation")
+        self.notebook.add(self.tab_genes, text="7 · Gene counts")
         self.notebook.add(self.tab_log, text="Log")
 
         self._build_setup_tab(self._make_scrollable(self.tab_setup))
@@ -1315,6 +1362,7 @@ class DEAApp(ttk.Frame):
         self._build_table_tab(self._make_scrollable(self.tab_table))
         self._build_gsea_tab(self._make_scrollable(self.tab_gsea))
         self._build_ora_tab(self._make_scrollable(self.tab_ora))
+        self._build_genes_tab(self._make_scrollable(self.tab_genes))
         self._build_log_tab(self._make_scrollable(self.tab_log))
 
         status_frame = tk.Frame(self, bg=PALETTE["accent_pale_2"])
@@ -1448,6 +1496,14 @@ class DEAApp(ttk.Frame):
         rb2.pack(side=tk.LEFT, padx=12, pady=8)
         add_tip(rb2, "Choose this option if your data are microarray intensity values "
                      "(typically already log-transformed). The analysis will use limma.")
+        ttk.Label(method_frame, text="   Organism:").pack(side=tk.LEFT, padx=(24, 4), pady=8)
+        species_combo = ttk.Combobox(method_frame, textvariable=self.species_display, state="readonly",
+                                      width=26, values=list(engine.SPECIES_CHOICES.keys()))
+        species_combo.pack(side=tk.LEFT, pady=8)
+        add_tip(species_combo, "Species of the data. It decides how Ensembl/Entrez IDs are converted to gene "
+                               "symbols and which MSigDB gene sets are used for GSEA/ORA. For mouse, rat or "
+                               "zebrafish the matching annotation package must be installed in R "
+                               "(org.Mm.eg.db, org.Rn.eg.db, org.Dr.eg.db).")
 
         group_frame = ttk.LabelFrame(f, text="Groups to compare")
         group_frame.pack(fill=tk.X, padx=10, pady=8)
@@ -1579,6 +1635,7 @@ class DEAApp(ttk.Frame):
         self.counts_path.trace_add("write", lambda *a: self._validate_setup())
         self.metadata_path.trace_add("write", lambda *a: self._validate_setup())
         self.metadata_path.trace_add("write", lambda *a: self._refresh_pca_color_columns())
+        self.metadata_path.trace_add("write", lambda *a: self._refresh_gene_plot_columns())
 
     def _reset_setup_fields(self):
         self.counts_path.set("")
@@ -2021,6 +2078,227 @@ class DEAApp(ttk.Frame):
         self.ora_tree.pack(fill=tk.BOTH, expand=True)
         paned.add(table_frame, weight=1)
 
+    # ---- Gene counts tab ------------------------------------------------------
+    def _build_genes_tab(self, f):
+        top_bar = ttk.Frame(f)
+        top_bar.pack(fill=tk.X, padx=8, pady=(8, 0))
+        self._build_help_button(top_bar, "genes").pack(anchor="center", pady=(10, 5))
+
+        row1 = ttk.Frame(f)
+        row1.pack(fill=tk.X, padx=8, pady=(4, 4))
+        ttk.Label(row1, text="Gene:").pack(side=tk.LEFT)
+        gene_entry = ttk.Entry(row1, textvariable=self.gene_plot_gene, width=16)
+        gene_entry.pack(side=tk.LEFT, padx=(4, 12))
+        gene_entry.bind("<Return>", lambda e: self._draw_gene_plot())
+        add_tip(gene_entry, "Gene symbol as it appears in the analysis (e.g. TP53, Trp53). Upper/lower case "
+                            "is not important. Genes removed by the low-counts filter are not available.")
+        ttk.Label(row1, text="Metadata (Y axis):").pack(side=tk.LEFT)
+        self.gene_var_combo = ttk.Combobox(row1, textvariable=self.gene_plot_var, state="readonly", width=22,
+                                           values=[], postcommand=self._refresh_gene_plot_columns)
+        self.gene_var_combo.pack(side=tk.LEFT, padx=(4, 12))
+        self.gene_var_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_gene_plot())
+        add_tip(self.gene_var_combo, "Metadata column to compare with the expression. Numeric columns (age...) "
+                                     "give a dot plot with Spearman correlation; text columns (sex, stage...) "
+                                     "give a box plot per group with Mann-Whitney / Kruskal-Wallis.")
+        ttk.Label(row1, text="Type:").pack(side=tk.LEFT)
+        kind_combo = ttk.Combobox(row1, textvariable=self.gene_plot_kind, state="readonly", width=12,
+                                  values=pcol.KIND_CHOICES)
+        kind_combo.pack(side=tk.LEFT, padx=(4, 12))
+        kind_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_gene_plot())
+        add_tip(kind_combo, "'Auto' decides from the values. Force 'Categorical' for numeric codes that are "
+                            "really groups, or 'Numeric' for a continuous variable.")
+        ttk.Button(row1, text="Plot", style="Accent.TButton", command=self._draw_gene_plot).pack(side=tk.LEFT, padx=8)
+
+        row2 = ttk.Frame(f)
+        row2.pack(fill=tk.X, padx=8, pady=(0, 4))
+        ttk.Label(row2, text="Color points by:").pack(side=tk.LEFT)
+        self.gene_color_combo = ttk.Combobox(row2, textvariable=self.gene_plot_color_col, state="readonly",
+                                             width=24, values=[gplot.NO_COLOR],
+                                             postcommand=self._refresh_gene_plot_columns)
+        self.gene_color_combo.pack(side=tk.LEFT, padx=(4, 12))
+        self.gene_color_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_gene_plot())
+        add_tip(self.gene_color_combo,
+                "Colors the points (one point = one sample) by any column of the metadata file. Numeric columns "
+                "get a continuous color scale with a color bar; text columns get one distinct color per group. "
+                "Missing values ('not available', empty...) are grey.")
+        ttk.Label(row2, text="Type:").pack(side=tk.LEFT)
+        ckind = ttk.Combobox(row2, textvariable=self.gene_plot_color_kind, state="readonly", width=12,
+                             values=pcol.KIND_CHOICES)
+        ckind.pack(side=tk.LEFT, padx=(4, 12))
+        ckind.bind("<<ComboboxSelected>>", lambda e: self._draw_gene_plot())
+        ttk.Label(row2, text="Scale (numeric):").pack(side=tk.LEFT)
+        ccmap = ttk.Combobox(row2, textvariable=self.gene_plot_cmap, state="readonly", width=12,
+                             values=list(pcol.CMAPS.keys()))
+        ccmap.pack(side=tk.LEFT, padx=(4, 12))
+        ccmap.bind("<<ComboboxSelected>>", lambda e: self._draw_gene_plot())
+        cb_cb = ttk.Checkbutton(row2, text="Color-blind-friendly palette", variable=self.gene_plot_colorblind,
+                                command=self._draw_gene_plot)
+        cb_cb.pack(side=tk.LEFT, padx=(4, 0))
+
+        row3 = ttk.Frame(f)
+        row3.pack(fill=tk.X, padx=8, pady=(0, 4))
+        ttk.Checkbutton(row3, text="Show sample labels", variable=self.gene_plot_labels,
+                        command=self._draw_gene_plot).pack(side=tk.LEFT)
+        trend_cb = ttk.Checkbutton(row3, text="Linear trend line (numeric metadata)", variable=self.gene_plot_trend,
+                                   command=self._draw_gene_plot)
+        trend_cb.pack(side=tk.LEFT, padx=(14, 0))
+        ttk.Label(row3, text="  Custom title:").pack(side=tk.LEFT, padx=(16, 4))
+        ttk.Entry(row3, textvariable=self.gene_plot_title_var, width=26).pack(side=tk.LEFT)
+        ttk.Button(row3, text="Apply", style="Accent.TButton", command=self._draw_gene_plot).pack(side=tk.LEFT, padx=10)
+        ttk.Button(row3, text="Export plot data CSV...", command=self._export_gene_plot_data).pack(side=tk.LEFT, padx=6)
+
+        self.gene_msg_var = tk.StringVar(value="Run an analysis first, then type a gene and press 'Plot'.")
+        ttk.Label(f, textvariable=self.gene_msg_var, style="Muted.TLabel", wraplength=900).pack(
+            anchor="w", padx=10, pady=(0, 2))
+
+        expl = ("Gene counts: each point is a SAMPLE; X axis = expression of the chosen gene in that sample "
+                "(log2 of the size-factor-normalized counts, the scale is written on the axis). With a numeric "
+                "metadata column (e.g. age) the chart is a dot plot with Spearman's rho; with a text column "
+                "(e.g. sex) it is a box plot per group with Mann-Whitney (2 groups) or Kruskal-Wallis (>2). "
+                "'Color points by' paints the points with any other metadata column. The normalized values are "
+                "exploratory only: the differential expression statistics come from the raw counts model.")
+        self.gene_panel = InteractivePlotPanel(f, expl, redraw_callback=self._draw_gene_plot)
+        self.gene_panel.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self._gene_plot_frame = None
+
+    def _read_meta_cached(self, path: str) -> pd.DataFrame:
+        mtime = os.path.getmtime(path)
+        if self._meta_cache[0] != path or self._meta_cache[1] != mtime:
+            self._meta_cache = (path, mtime, pcol.read_metadata(path))
+        return self._meta_cache[2]
+
+    def _refresh_gene_plot_columns(self):
+        """Fills the metadata-column lists of the Gene counts tab."""
+        vcombo = getattr(self, "gene_var_combo", None)
+        ccombo = getattr(self, "gene_color_combo", None)
+        if vcombo is None or ccombo is None:
+            return
+        path = self.metadata_path.get().strip()
+        cols = []
+        if path and os.path.isfile(path):
+            try:
+                cols = list(self._read_meta_cached(path).columns)
+                sname = pcol.resolve_column(self._read_meta_cached(path), self._parse_col(self.sample_col.get()))
+                cols_y = [c for c in cols if c != sname]
+            except Exception:
+                cols, cols_y = [], []
+        else:
+            cols_y = []
+        vcombo["values"] = cols_y
+        ccombo["values"] = [gplot.NO_COLOR] + cols
+        if self.gene_plot_var.get() not in cols_y:
+            self.gene_plot_var.set(cols_y[0] if cols_y else "")
+        if self.gene_plot_color_col.get() not in ccombo["values"]:
+            self.gene_plot_color_col.set(gplot.NO_COLOR)
+
+    def _draw_gene_plot(self):
+        panel = getattr(self, "gene_panel", None)
+        if panel is None:
+            return
+        if self._gene_colorbar is not None:
+            try:
+                self._gene_colorbar.remove()
+            except Exception:
+                pass
+            self._gene_colorbar = None
+        panel.clear()
+        self._gene_plot_frame = None
+        if self.results is None:
+            panel.redraw()
+            return
+        nm = self.results.norm_matrix
+        if nm is None:
+            self.gene_msg_var.set("The normalized expression matrix is not available for this run "
+                                  "(see the Log tab for the reason).")
+            panel.redraw()
+            return
+        gene = self.gene_plot_gene.get().strip()
+        if not gene:
+            self.gene_msg_var.set("Type a gene symbol and press 'Plot'.")
+            panel.redraw()
+            return
+        var = self.gene_plot_var.get()
+        if not var:
+            self.gene_msg_var.set("Select a metadata column for the Y axis.")
+            panel.redraw()
+            return
+
+        meta_path, sample_col = self._pca_meta_source()
+        try:
+            meta = self._read_meta_cached(meta_path)
+            frame = gplot.build_frame(nm, meta, sample_col, gene, var, self.gene_plot_kind.get())
+        except Exception as e:
+            self.gene_msg_var.set(f"⚠ {e}")
+            panel.redraw()
+            return
+
+        try:
+            spec = gplot.color_spec_for(frame, meta, sample_col, self.gene_plot_color_col.get(),
+                                        self.gene_plot_color_kind.get(), self.gene_plot_colorblind.get(),
+                                        self.gene_plot_cmap.get())
+        except Exception as e:
+            messagebox.showwarning("Gene counts colors",
+                                   f"Cannot color by '{self.gene_plot_color_col.get()}':\n{e}\n\n"
+                                   "Falling back to a single color.")
+            self.gene_plot_color_col.set(gplot.NO_COLOR)
+            spec = gplot.color_spec_for(frame, meta, sample_col, gplot.NO_COLOR)
+
+        artists, stats, extra = gplot.draw_gene_plot(
+            panel.ax, frame, spec, self.results.norm_label, size=60, alpha=0.85,
+            title=self.gene_plot_title_var.get().strip() or None,
+            show_sample_labels=self.gene_plot_labels.get(), show_trend=self.gene_plot_trend.get())
+        if panel.legend_on.get():
+            self._gene_colorbar = gplot.add_legend_or_colorbar(panel.figure, panel.ax, spec, extra,
+                                                               legend_fn=panel.place_legend)
+        panel.apply_common_style()
+        self._gene_plot_frame = (frame, stats)
+
+        n_unmatched = spec.get("n_unmatched", 0)
+        n_missing = spec.get("n_missing", 0)
+        note = f"{frame['gene']} vs {var}: {len(frame['df'])} samples plotted"
+        if not spec.get("uniform"):
+            note += f" | colored by '{spec['column']}'"
+            if n_missing:
+                note += f" ({n_missing} without a value, grey)"
+        if n_unmatched:
+            note += f" | ⚠ {n_unmatched} sample IDs not found in the metadata"
+        self.gene_msg_var.set(note)
+
+        if HAS_MPLCURSORS and artists:
+            all_sc = [a for a, _ in artists]
+            all_sub = [sdf for _, sdf in artists]
+            col_name = spec["column"]
+
+            def fmt(idx_tuple):
+                artist_idx, point_idx = idx_tuple
+                row = all_sub[artist_idx].iloc[point_idx]
+                txt = f"{row.get('SampleID', '?')}\nexpr: {row['expr']:.2f} | {var}: {row['val']}"
+                if not spec.get("uniform"):
+                    cv = row.get("_val")
+                    txt += f"\n{col_name}: {'n.a.' if pd.isna(cv) else cv}"
+                return txt
+            panel.enable_hover(all_sc, lambda idx: fmt(idx) if isinstance(idx, tuple) else str(idx))
+        panel.redraw()
+
+    def _export_gene_plot_data(self):
+        if not getattr(self, "_gene_plot_frame", None):
+            messagebox.showinfo("Info", "Draw a gene plot first.")
+            return
+        frame, stats = self._gene_plot_frame
+        path = filedialog.asksaveasfilename(
+            title="Save plot data", defaultextension=".csv", initialfile=f"{frame['gene']}_vs_{frame['variable']}.csv",
+            filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        out = frame["df"].rename(columns={"expr": f"expression ({self.results.norm_label})",
+                                          "val": frame["variable"]})
+        try:
+            out.to_csv(path, index=False)
+        except OSError as e:
+            messagebox.showerror("Error", f"Unable to save the file: {e}")
+            return
+        self.status_var.set(f"Plot data saved to: {path}")
+
     def _build_log_tab(self, f):
         top_bar = ttk.Frame(f)
         top_bar.pack(fill=tk.X, padx=8, pady=(8, 0))
@@ -2095,6 +2373,10 @@ class DEAApp(ttk.Frame):
     SETTINGS_FORMAT = "de-gui-settings"
     SETTINGS_VERSION = 1
 
+    def _species_value(self) -> str:
+        """Species name passed to R (e.g. 'Mus musculus') from the label shown in the combo box."""
+        return engine.SPECIES_CHOICES.get(self.species_display.get(), engine.DEFAULT_SPECIES)
+
     def _collect_settings(self) -> dict:
         """Everything that defines the analysis (not the plot cosmetics)."""
         t, r = self.test_group_var.get(), self.ref_group_var.get()
@@ -2110,6 +2392,7 @@ class DEAApp(ttk.Frame):
             "test_group": t,
             "ref_group": r,
             "gene_list": gene_list,
+            "species": self._species_value(),
             "padj_cutoff": self.padj_cutoff.get(),
             "lfc_cutoff": self.lfc_cutoff.get(),
             "min_counts": self.min_counts_var.get(),
@@ -2175,6 +2458,9 @@ class DEAApp(ttk.Frame):
         put(self.counts_path, "counts_path", str)
         put(self.metadata_path, "metadata_path", str)
         put(self.method, "method", str)
+        sp_inv = {v: k for k, v in engine.SPECIES_CHOICES.items()}
+        if s.get("species") in sp_inv:
+            self.species_display.set(sp_inv[s["species"]])
         put(self.gene_col, "gene_col", str)
         put(self.sample_col, "sample_col", str)
         put(self.condition_col, "condition_col", str)
@@ -2316,6 +2602,7 @@ class DEAApp(ttk.Frame):
             "condition_col": self.condition_col.get(),
             "contrast": list(contrast) if contrast else None,
             "pairwise_all": self.pairwise_all.get(),
+            "species": self._species_value(),
             "gene_list": list(gene_list),
             "padj_cutoff": self.padj_cutoff.get(),
             "lfc_cutoff": self.lfc_cutoff.get(),
@@ -2353,6 +2640,7 @@ class DEAApp(ttk.Frame):
                     run_ora=run_ora,
                     ora_direction=ora_direction,
                     gene_list=gene_list or None,
+                    species=self._species_value(),
                     log_callback=self._threadsafe_log,
                 )
                 self.root.after(0, lambda: self._on_results_ready(results))
@@ -2395,6 +2683,7 @@ class DEAApp(ttk.Frame):
             self.active_tag.set(tags[0])
         self._log(">>> Analysis completed successfully.")
         self._refresh_pca_color_columns()
+        self._refresh_gene_plot_columns()
         self._refresh_all_views()
         self.notebook.select(self.tab_pca)
 
@@ -2407,6 +2696,7 @@ class DEAApp(ttk.Frame):
         self._populate_gene_table()
         self._draw_gsea()
         self._draw_ora()
+        self._draw_gene_plot()
 
     # ---- PCA coloring helpers -------------------------------------------------
     def _pca_meta_source(self):
@@ -2823,6 +3113,13 @@ class DEAApp(ttk.Frame):
         results = self.results
         params = dict(self.run_params or {})
         params["pca_color"] = self.pca_color_settings()   # same coloring as the on-screen PCA
+        if getattr(self, "_gene_plot_frame", None):        # gene plot currently on screen -> extra report page
+            params["gene_plot"] = {
+                "gene": self._gene_plot_frame[0]["gene"], "variable": self.gene_plot_var.get(),
+                "kind": self.gene_plot_kind.get(), "color_by": self.gene_plot_color_col.get(),
+                "color_kind": self.gene_plot_color_kind.get(), "cmap": self.gene_plot_cmap.get(),
+                "colorblind": bool(self.gene_plot_colorblind.get()), "labels": bool(self.gene_plot_labels.get()),
+                "trend": bool(self.gene_plot_trend.get())}
         log_text = self.log_text.get("1.0", "end")
         self.report_button.configure(state="disabled")
         self.status_var.set("Generating PDF report... this may take a few seconds.")
