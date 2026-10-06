@@ -23,6 +23,17 @@ class RPipelineError(RuntimeError):
     pass
 
 
+# Organisms supported by the R core (SPECIES_TABLE in DE_scheletro_FINALE.Rmd, block 1b).
+# label shown in the GUI -> name passed to R (also used by msigdbr and the OrgDb annotation package).
+SPECIES_CHOICES = {
+    "Human (Homo sapiens)": "Homo sapiens",
+    "Mouse (Mus musculus)": "Mus musculus",
+    "Rat (Rattus norvegicus)": "Rattus norvegicus",
+    "Zebrafish (Danio rerio)": "Danio rerio",
+}
+DEFAULT_SPECIES = "Homo sapiens"
+
+
 def find_rscript() -> Optional[str]:
     exe = shutil.which("Rscript") or shutil.which("Rscript.exe")
     if exe:
@@ -90,6 +101,18 @@ def parse_r_error(raw_error: str) -> str:
             f"The R package '{pkg}' does not appear to be installed.\n"
             f"Make sure all the pipeline dependencies are installed in R."
         )
+
+    if "non installato" in raw_err_lower and "org." in raw_err_lower:
+        match = re.search(r"(org\.[A-Za-z]+\.eg\.db)", raw_error)
+        pkg = match.group(1) if match else "the OrgDb annotation package"
+        return (
+            f"❌ R ENVIRONMENT ERROR:\n"
+            f"The annotation package '{pkg}' required for the selected species is not installed.\n"
+            f"In R run: BiocManager::install('{pkg}')"
+        )
+
+    if "specie non supportata" in raw_err_lower:
+        return "❌ The selected species is not supported by the R core (see SPECIES_TABLE in the .Rmd)."
 
     if "design matrix not full rank" in raw_err_lower or "not full rank" in raw_err_lower:
         return (
@@ -228,6 +251,7 @@ class PipelineConfig:
     run_ora: bool = True
     ora_direction: str = "all"     
     gene_list: Optional[list] = None   # if set, only these genes are analyzed
+    species: str = DEFAULT_SPECIES      # organism of the data (ID conversion + MSigDB gene sets)
 
     min_reads: int = 10
     min_samples: int = 3
@@ -253,6 +277,7 @@ class PipelineConfig:
             "run_ora": self.run_ora,
             "ora_direction": self.ora_direction,
             "gene_list": self.gene_list,
+            "species": self.species,
             "min_reads": self.min_reads,
             "min_samples": self.min_samples,
             "min_counts": self.min_counts,
@@ -369,6 +394,9 @@ class RunResults:
     pca_x_label: str
     pca_y_label: str
     per_contrast: dict  
+    norm_matrix: Optional[pd.DataFrame] = None   # genes x samples, log2 normalized expression (gene count plots)
+    norm_label: str = "log2(normalized counts + 1)"
+    species: str = DEFAULT_SPECIES
 
 
 def run_dea(counts_path: str, metadata_path: str, method: str,
@@ -380,7 +408,8 @@ def run_dea(counts_path: str, metadata_path: str, method: str,
             out_dir: Optional[str] = None, log_callback=None,
             min_counts=10,
             run_ora: bool = True, ora_direction: str = "all",
-            gene_list: Optional[list] = None) -> RunResults:
+            gene_list: Optional[list] = None,
+            species: str = DEFAULT_SPECIES) -> RunResults:
 
     if ora_direction not in ("all", "up", "down"):
         raise ValueError(f"Invalid ora_direction: '{ora_direction}' (allowed: all, up, down).")
@@ -394,6 +423,9 @@ def run_dea(counts_path: str, metadata_path: str, method: str,
         min_reads=min_reads,
         min_samples=min_samples
     )
+
+    if species not in SPECIES_CHOICES.values():
+        raise ValueError(f"Unsupported species: '{species}' (allowed: {', '.join(SPECIES_CHOICES.values())}).")
 
     cfg = PipelineConfig(
         mode="run_dea",
@@ -412,6 +444,7 @@ def run_dea(counts_path: str, metadata_path: str, method: str,
         run_ora=run_ora,
         ora_direction=ora_direction,
         gene_list=[g for g in (gene_list or []) if str(g).strip()] or None,
+        species=species,
         min_reads=min_reads,
         min_samples=min_samples,
         min_counts=int(min_counts),
@@ -450,6 +483,7 @@ def run_dea(counts_path: str, metadata_path: str, method: str,
         ranked_tbl = pd.read_csv(ranked_path) if ranked_path.exists() else pd.DataFrame()
         gsea_tbl = pd.read_csv(gsea_path) if gsea_path.exists() else None
         ora_tbl = pd.read_csv(ora_path) if ora_path.exists() else None
+        ranked_tbl, ora_tbl = _normalize_r_columns(ranked_tbl, ora_tbl)
         ora_meta = None
         if ora_meta_path.exists():
             with open(ora_meta_path, encoding="utf-8") as f:
@@ -469,12 +503,45 @@ def run_dea(counts_path: str, metadata_path: str, method: str,
             ora_tbl=ora_tbl, ora_meta=ora_meta,
         )
 
+    norm_matrix, norm_label = None, "log2(normalized counts + 1)"
+    norm_path = out_path / "norm_matrix.csv"
+    if norm_path.exists():
+        try:
+            norm_matrix = pd.read_csv(norm_path, index_col=0)
+            norm_matrix.index = norm_matrix.index.astype(str)
+            norm_matrix.columns = [str(c) for c in norm_matrix.columns]
+            nm_meta = out_path / "norm_meta.json"
+            if nm_meta.exists():
+                with open(nm_meta, encoding="utf-8") as f:
+                    norm_label = json.load(f).get("scale_label", norm_label)
+        except Exception:
+            norm_matrix = None
+
     return RunResults(
         pca_data=pca_data,
         pca_x_label=labels.get("x_label", "PC1"),
         pca_y_label=labels.get("y_label", "PC2"),
         per_contrast=per_contrast,
+        norm_matrix=norm_matrix,
+        norm_label=norm_label,
+        species=species,
     )
+
+
+def _normalize_r_columns(ranked_tbl: pd.DataFrame, ora_tbl: Optional[pd.DataFrame]):
+    """The R core writes some columns with Italian names/values (Regolazione, Significativo,
+    Direzione = UP/DOWN/MISTO). The rest of the application uses the English ones
+    (Regulation, Significant, Direction = UP/DOWN/MIXED): translate them once, here."""
+    if ranked_tbl is not None and not ranked_tbl.empty:
+        ranked_tbl = ranked_tbl.rename(columns={"Regolazione": "Regulation",
+                                                "Significativo": "Significant"})
+        if "Significant" in ranked_tbl.columns:
+            ranked_tbl["Significant"] = ranked_tbl["Significant"].replace({"SI": "Yes", "NO": "No"})
+    if ora_tbl is not None and not ora_tbl.empty:
+        ora_tbl = ora_tbl.rename(columns={"Direzione": "Direction"})
+        if "Direction" in ora_tbl.columns:
+            ora_tbl["Direction"] = ora_tbl["Direction"].replace({"MISTO": "MIXED"})
+    return ranked_tbl, ora_tbl
 
 
 def annotate_regulation(ranked_tbl: pd.DataFrame, group_high: Optional[str],
