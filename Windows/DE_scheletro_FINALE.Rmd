@@ -1,621 +1,310 @@
----
-title: "DE_scheletro"
-output: html_notebook
---- 
-
-# 1. LIBRARIES
-```{r}
-library(tidyverse) 
-library(readxl)
+suppressWarnings(suppressMessages({
+  ok_jsonlite <- requireNamespace("jsonlite", quietly = TRUE)
+}))
+if (!ok_jsonlite) {
+  stop("The 'jsonlite' package is not installed. Run: install.packages('jsonlite')")
+}
 library(jsonlite)
-library(DESeq2)
-library(msigdbr)
-library(fgsea)
-library(clusterProfiler)
-library(org.Hs.eg.db)
-library(limma)
-library(BiocParallel)
-```
 
-# 2. CLEANING FUNCTIONS (Input Standardization)
-```{r}
-clean_identifiers <- function(x) {
-  if (is.null(x)) return(NULL)
-  x <- trimws(as.character(x))
-  x <- gsub(" ", "_", x)       
-  x <- make.names(x)           
-  x <- gsub("\\.", "_", x)     
-  return(x)
+`%||%` <- function(a, b) if (is.null(a) || (length(a) == 1 && is.na(a))) b else a
+
+# --- Utility: locates the folder where this script lives -----------
+.script_dir <- function() {
+  cmd_args <- commandArgs(trailingOnly = FALSE)
+  file_flag <- "--file="
+  hit <- grep(file_flag, cmd_args)
+  if (length(hit) > 0) {
+    return(dirname(normalizePath(sub(file_flag, "", cmd_args[hit]))))
+  }
+  return(getwd())
 }
 
-.read_flexible <- function(path) {
-  ext <- tolower(tools::file_ext(path))
-  
-  if (ext %in% c("csv", "tsv", "txt")) {
-    first_line <- readLines(path, n = 1, warn = FALSE)
-    
-    if (grepl("\t", first_line)) {
-      df <- readr::read_tsv(path, show_col_types = FALSE)
-    } else if (grepl(";", first_line)) {
-      df <- readr::read_csv2(path, show_col_types = FALSE)
-    } else {
-      df <- readr::read_csv(path, show_col_types = FALSE)
+# --- Extracts ONLY the function definitions from DE_scheletro_FINALE.Rmd.
+# Main sections (lines starting with a single "# N.") are loaded EXCEPT:
+#   7 ("SIMULATION AND FULL TEST")  and  9 ("USAGE EXAMPLE"): demo code with hardcoded paths / objects.
+# Section 8 (expression vs metadata plots) only defines functions, so it is loaded.
+.SKIP_SECTIONS <- c(7L, 9L)
+
+.load_core_functions <- function(core_path) {
+  if (!file.exists(core_path)) {
+    stop("File DE_scheletro_FINALE.Rmd not found at: ", core_path)
+  }
+  raw_lines <- readLines(core_path, warn = FALSE, encoding = "UTF-8")
+
+  in_chunk <- FALSE
+  skip_section <- FALSE
+  code_lines <- character(0)
+
+  for (ln in raw_lines) {
+    trimmed <- trimws(ln)
+
+    # Section headings are only looked for OUTSIDE code chunks (inside chunks "# 7." etc. are plain comments)
+    if (!in_chunk) {
+      m <- regmatches(trimmed, regexec("^#\\s*([0-9]+)\\.", trimmed))[[1]]
+      if (length(m) == 2) skip_section <- as.integer(m[2]) %in% .SKIP_SECTIONS
     }
-    
-  } else if (ext %in% c("xlsx", "xls")) {
-    df <- readxl::read_excel(path)
-  } else if (ext == "json") {
-    df <- jsonlite::fromJSON(path, flatten = TRUE)
-  } else {
-    stop("Unsupported file format: ", ext)
+
+    if (grepl("^```\\{r", trimmed)) { in_chunk <- TRUE; next }
+    if (in_chunk && trimmed == "```") { in_chunk <- FALSE; next }
+    if (in_chunk && !skip_section) code_lines <- c(code_lines, ln)
   }
-  
-  return(as.data.frame(df))
+
+  if (length(code_lines) == 0) {
+    stop("Could not extract any function from DE_scheletro_FINALE.Rmd: unexpected format.")
+  }
+
+  tmp_core <- tempfile(fileext = ".R")
+  writeLines(code_lines, tmp_core, useBytes = TRUE)
+  source(tmp_core, echo = FALSE)
 }
 
-.convert_gene_ids <- function(gene_vector) {
-  gene_vector <- trimws(as.character(gene_vector))
-  gene_vector_clean <- gsub("\\..*$", "", gene_vector)
-  test_genes <- head(gene_vector, 20)
-  
-  if (any(grepl("^ENSG", test_genes))) {
-    mapped <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = gene_vector_clean,
-                                    column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
-    mapped[is.na(mapped)] <- gene_vector[is.na(mapped)]
-    return(unname(mapped))
-  }
-  if (any(grepl("^\\d+$", test_genes))) {
-    mapped <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = gene_vector_clean,
-                                    column = "SYMBOL", keytype = "ENTREZID", multiVals = "first")
-    mapped[is.na(mapped)] <- gene_vector[is.na(mapped)]
-    return(unname(mapped))
-  }
-  return(gene_vector)
+# --- Writes an error in JSON format and exits with status != 0 -------------
+.fail <- function(out_dir, msg) {
+  err_path <- file.path(out_dir, "error.json")
+  write(toJSON(list(error = msg), auto_unbox = TRUE), err_path)
+  cat("ERROR: ", msg, "\n", sep = "")
+  quit(status = 1)
 }
-```
 
-# 3. IMPORT FUNCTIONS
-```{r}
-import_expression <- function(path, gene_col = 1, is_microarray = FALSE) {
-  df <- .read_flexible(path)
-  
-  if (is.character(gene_col)) gene_col <- clean_identifiers(gene_col)
-  colnames(df) <- clean_identifiers(colnames(df))
-  gene_col_name <- if(is.numeric(gene_col)) colnames(df)[gene_col] else gene_col
-  
-  genes <- df[[gene_col_name]]
-  expr_data <- df[, colnames(df) != gene_col_name, drop = FALSE]
-  
-  expr_data <- as.data.frame(lapply(expr_data, function(col) {
-    if (is.character(col)) {
-      col <- gsub(",", ".", col) # Correggi virgole italiane
-    }
-    as.numeric(as.character(col)) # Force conversion to numeric
+# MAIN
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 1) {
+  stop("Usage: Rscript run_pipeline.R <config.json>")
+}
+config_path <- args[1]
+if (!file.exists(config_path)) {
+  stop("Configuration file not found: ", config_path)
+}
+cfg <- fromJSON(config_path)
+out_dir <- cfg$out_dir
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+core_path <- cfg$core_path %||% file.path(.script_dir(), "DE_scheletro_FINALE.Rmd")
+
+tryCatch({
+
+  suppressWarnings(suppressMessages({
+    .load_core_functions(core_path)
   }))
-  
-  clean_genes <- .convert_gene_ids(genes)
-  expr_data$GENE_ID <- clean_genes
-  
-  if (is_microarray) {
-    expr_clean <- expr_data %>%
-      group_by(GENE_ID) %>%
-      summarise(across(where(is.numeric), ~ mean(.x, na.rm = TRUE))) %>%
-      ungroup() %>% as.data.frame()
-  } else {
-    expr_clean <- expr_data %>%
-      group_by(GENE_ID) %>%
-      summarise(across(where(is.numeric), ~ as.integer(round(sum(.x, na.rm = TRUE))))) %>%
-      ungroup() %>% as.data.frame()
-  }
-  
-  rownames(expr_clean) <- expr_clean$GENE_ID
-  expr_clean$GENE_ID <- NULL
-  return(expr_clean)
-}
 
-import_metadata <- function(path, sample_col = 1, condition_col = NULL) {
-  df <- .read_flexible(path)
-  
-  if (is.character(sample_col)) sample_col <- clean_identifiers(sample_col)
-  if (!is.null(condition_col) && is.character(condition_col)) condition_col <- clean_identifiers(condition_col)
-  
-  colnames(df) <- clean_identifiers(colnames(df))
-  sample_col_name <- if(is.numeric(sample_col)) colnames(df)[sample_col] else sample_col
-  
-  df[[sample_col_name]] <- clean_identifiers(df[[sample_col_name]])
-  df <- as.data.frame(df)
-  rownames(df) <- df[[sample_col_name]]
-  
-  if (!is.null(condition_col)) {
-    condition_col_name <- if(is.numeric(condition_col)) colnames(df)[condition_col] else condition_col
-    df$condition <- df[[condition_col_name]]
-  }
-  
-  df[, sample_col_name] <- NULL
-  df <- df %>% mutate(across(where(is.character), ~ clean_identifiers(.x)))
-  return(df)
-}
+  # MODE 1: list_groups
+  # Reads only the metadata and extracts the available groups, so the GUI can let the user choose them BEFORE launching the whole pipeline.
+  if (cfg$mode == "list_groups") {
 
-# Automatic extraction of group labels from the metadata: returns the unique groups (conditions) available, so the user can pick 2 (or more, for pairwise comparisons) without typing them by hand.
-get_available_groups <- function(metadata) {
-  if (!"condition" %in% colnames(metadata)) {
-    stop("The 'condition' column is not present in the metadata. Did you specify condition_col in import_metadata()?")
-  }
-  groups <- sort(unique(as.character(metadata$condition)))
-  n_samples <- table(as.character(metadata$condition))
-  
-  cat(">>> Groups available in the dataset:\n")
-  for (g in groups) {
-    cat(sprintf(" - %s (n = %d samples)\n", g, n_samples[g]))
-  }
-  
-  if (length(groups) < 2) {
-    warning("Warning: only one group was found. 2 groups are needed for a DEA comparison.")
-  }
-  
-  return(groups)
-}
-```
+    metadata <- import_metadata(cfg$metadata_path,
+                                 sample_col = cfg$sample_col,
+                                 condition_col = cfg$condition_col)
 
-# 4. DEA ENGINE
-```{r}
-# Validation of the contrast chosen by the user: checks that EXACTLY 2 groups were chosen among those actually present in the metadata, before launching DESeq2/limma.
-validate_contrast <- function(metadata, contrast) {
-  if (!"condition" %in% colnames(metadata)) {
-    stop("The 'condition' column is not present in the metadata.")
-  }
-  groups <- unique(as.character(metadata$condition))
-  
-  if (length(contrast) != 2) {
-    stop("The contrast must contain EXACTLY 2 groups (e.g. c('Diseased','Healthy')). ",
-         "For multiple comparisons across more groups, use run_all_pairwise_comparisons().")
-  }
-  if (!all(contrast %in% groups)) {
-    missing <- contrast[!contrast %in% groups]
-    stop("Group(s) not found in the metadata: ", paste(missing, collapse = ", "),
-         "\nAvailable groups: ", paste(groups, collapse = ", "))
-  }
-  invisible(TRUE)
-}
+    groups <- get_available_groups(metadata)
+    n_per_group <- as.list(table(as.character(metadata$condition)))
 
-run_differential_expression <- function(expr_matrix, metadata, method = "RNAseq", contrast = c("treated", "control"), min_counts = 10) {
-  # Validation of the user-chosen comparison against the real labels in the metadata
-  validate_contrast(metadata, contrast)
-  
-  samples_intersect <- intersect(colnames(expr_matrix), rownames(metadata))
-  expr_matrix <- expr_matrix[, samples_intersect]
-  metadata <- metadata[samples_intersect, , drop = FALSE]
-  
-  # Keep ONLY the samples of the 2 selected groups: any other group present in the metadata is excluded from normalization, dispersion estimation / variance modelling and filtering, so it cannot influence the result.
-  keep <- as.character(metadata$condition) %in% contrast
-  expr_matrix <- expr_matrix[, rownames(metadata)[keep], drop = FALSE]
-  metadata <- metadata[keep, , drop = FALSE]
-  metadata$condition <- factor(as.character(metadata$condition), levels = c(contrast[2], contrast[1]))
-  message(">>> Samples used: ", paste(contrast[1], sum(metadata$condition == contrast[1]), sep = "="),
-          ", ", paste(contrast[2], sum(metadata$condition == contrast[2]), sep = "="))
-  
-  if (method == "RNAseq") {
-    message(">>> Running DESeq2 modelling for RNA-seq...")
-    dds <- DESeqDataSetFromMatrix(countData = expr_matrix, colData = metadata, design = ~ condition)
-    # Pre-filter: minimum total counts per gene (computed on the 2 selected groups only; default 10).
-    dds <- dds[rowSums(counts(dds)) >= min_counts, ]
-    if (nrow(dds) < 2) stop("Fewer than 2 genes pass the minimum counts filter (", min_counts, "). Lower the threshold.")
-    
-    dds <- estimateSizeFactors(dds)
-    dds <- tryCatch({
-      estimateDispersions(dds)
-    }, error = function(e) {
-      message(">>> [Note] The parametric fit failed. Trying the local fit...")
-      tryCatch({
-        estimateDispersions(dds, fitType = "local")
-      }, error = function(e2) {
-        message(">>> [Note] Applying fitType = 'mean'...")
-        estimateDispersions(dds, fitType = "mean")
-      })
-    })
-    dds <- nbinomWaldTest(dds)
-    
-    res <- results(dds, contrast = c("condition", contrast[1], contrast[2]))
-    res_standard <- as.data.frame(res) %>%
-      tibble::rownames_to_column("GeneID") %>%
-      transmute(GeneID, log2FoldChange, pvalue, padj, stat)
-    
-  } else if (method == "Microarray") {
-    message(">>> Running limma modelling for Microarray...")
-    design <- model.matrix(~ 0 + condition, data = metadata)
-    colnames(design) <- gsub("condition", "", colnames(design))
-    
-    fit <- lmFit(expr_matrix, design)
-    contrast_formula <- paste(contrast[1], "-", contrast[2], sep = "")
-    contrast_matrix <- makeContrasts(contrasts = contrast_formula, levels = design)
-    
-    fit2 <- contrasts.fit(fit, contrast_matrix)
-    fit2 <- eBayes(fit2)
-    
-    res <- topTable(fit2, coef = 1, number = Inf, sort.by = "none")
-    res_standard <- res %>%
-      tibble::rownames_to_column("GeneID") %>%
-      transmute(GeneID, log2FoldChange = logFC, pvalue = P.Value, padj = adj.P.Val, stat = t)
-  } else {
-    stop("Invalid method: choose 'RNAseq' or 'Microarray'")
-  }
-  
-  return(res_standard)
-}
-
-# Pairwise comparisons across all available groups, useful when the metadata has more than 2 groups (e.g. Healthy, Drug_low, Drug_high) and all pairwise combinations are wanted (DESeq2/limma always compare 2 groups at a time).
-run_all_pairwise_comparisons <- function(expr_matrix, metadata, method = "RNAseq") {
-  groups <- get_available_groups(metadata)
-  if (length(groups) < 2) stop("At least 2 groups are needed for a comparison.")
-  
-  pairs <- combn(groups, 2, simplify = FALSE)
-  results_list <- list()
-  
-  for (p in pairs) {
-    label <- paste(p[1], "vs", p[2])
-    message(">>> Confronto: ", label)
-    results_list[[label]] <- run_differential_expression(expr_matrix, metadata,
-                                                           method = method, contrast = p)
-  }
-  return(results_list)  # named list: results_list[["Drug vs Control"]]
-}
-```
-
-# 5. PLOT AND TABLE FUNCTIONS
-```{r}
-plot_universal_volcano <- function(res_tbl, padj_cutoff = 0.05, lfc_cutoff = 1, title = "Volcano Plot") {
-  df_plot <- res_tbl %>%
-    mutate(status = case_when(
-      is.na(padj) ~ "Not Significant",
-      padj < padj_cutoff & log2FoldChange >= lfc_cutoff ~ "Upregulated",
-      padj < padj_cutoff & log2FoldChange <= -lfc_cutoff ~ "Downregulated",
-      TRUE ~ "Not Significant"
-    ))
-  
-  ggplot(df_plot, aes(x = log2FoldChange, y = -log10(padj))) +
-    geom_point(aes(color = status), alpha = 0.6, size = 2) +
-    scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue", "Not Significant" = "grey70")) +
-    geom_vline(xintercept = c(-lfc_cutoff, lfc_cutoff), linetype = "dashed") +
-    geom_hline(yintercept = -log10(padj_cutoff), linetype = "dashed") +
-    labs(title = title, x = "log2 Fold Change", y = "-log10 Adjusted P-value") +
-    theme_minimal()
-}
-
-plot_universal_pca <- function(expr_matrix, metadata, title = "PCA Plot") {
-  if (all(expr_matrix %% 1 == 0, na.rm = TRUE)) {
-    expr_matrix <- log2(expr_matrix + 1)
-  }
-  
-  gene_variances <- apply(expr_matrix, 1, var)
-  expr_matrix <- expr_matrix[gene_variances > 0 & !is.na(gene_variances), ]
-  
-  if (nrow(expr_matrix) == 0) {
-    stop("Error: all genes have zero variance. Check the input data.")
-  }
-  
-  pca_res <- prcomp(t(expr_matrix), scale. = TRUE)
-  percentVar <- round(100 * (pca_res$sdev^2 / sum(pca_res$sdev^2)))
-  
-  pca_df <- as.data.frame(pca_res$x) %>%
-    tibble::rownames_to_column("SampleID") %>%
-    inner_join(tibble::rownames_to_column(metadata, "SampleID"), by = "SampleID")
-  
-  ggplot(pca_df, aes(PC1, PC2, color = condition)) +
-    geom_point(size = 4) +
-    xlab(paste0("PC1: ", percentVar[1], "%")) +
-    ylab(paste0("PC2: ", percentVar[2], "%")) +
-    labs(title = title) +
-    theme_minimal()
-}
-
-generate_ranked_gene_table <- function(res_tbl, padj_cutoff = 0.05) {
-  res_tbl %>%
-    filter(!is.na(pvalue)) %>%
-    mutate(
-      Regulation = ifelse(log2FoldChange > 0, "UP-regulated", "DOWN-regulated"),
-      Significant = case_when(
-        is.na(padj) ~ "NA",
-        padj < padj_cutoff ~ "Yes",
-        TRUE ~ "No"
-      )
-    ) %>%
-    dplyr::select(GeneID, Regulation, Significant, log2FoldChange, pvalue, padj, stat) %>%
-    arrange(desc(Significant == "Yes"), padj, desc(abs(log2FoldChange)))
-}
-```
-
-# 6. ENRICHMENT FUNCTIONS
-
-## 6a. ORA (Over-Representation Analysis)
-```{r}
-# ORA: tests whether a set of genes (DEGs selected from the DE results, or a list supplied by the user) is over-represented in each MSigDB pathway (hypergeometric test via clusterProfiler::enricher).
-#
-# - gene_list = NULL  -> genes are selected from res_tbl using padj_cutoff / lfc_cutoff / direction
-# - gene_list = c(...) -> ORA on a list of specific genes chosen by the user (symbols, Ensembl or Entrez)
-# - direction: "all" (UP + DOWN), "up" (UP-regulated only), "down" (DOWN-regulated only); applies only if gene_list = NULL
-#
-# The universe (background) is all genes actually tested in the DEA (non-NA pvalue): using the whole genome as background
-# would give biased results, because unexpressed/filtered genes could never have come out as DE.
-run_ora_analysis <- function(res_tbl, gene_list = NULL, direction = c("all", "up", "down"),
-                             padj_cutoff = 0.05, lfc_cutoff = 1,
-                             category = "H", subcategory = NULL, species = "Homo sapiens",
-                             min_size = 15, max_size = 500, pvalue_cutoff = 0.05) {
-  direction <- match.arg(direction)
-  
-  # Universe: all genes tested in the DEA
-  universe <- unique(res_tbl$GeneID[!is.na(res_tbl$pvalue)])
-  
-  # Selection of input genes
-  if (is.null(gene_list)) {
-    sel <- res_tbl %>% filter(!is.na(padj), padj < padj_cutoff)
-    sel <- switch(direction,
-      "all"  = sel %>% filter(abs(log2FoldChange) >= lfc_cutoff),
-      "up"   = sel %>% filter(log2FoldChange >= lfc_cutoff),
-      "down" = sel %>% filter(log2FoldChange <= -lfc_cutoff)
+    out <- list(
+      groups = groups,
+      counts = n_per_group,
+      n_samples = nrow(metadata)
     )
-    input_genes <- unique(sel$GeneID)
-    origin <- sprintf("DEG (%s, padj < %.2f, |log2FC| >= %.1f)", direction, padj_cutoff, lfc_cutoff)
-  } else {
-    input_genes <- unique(.convert_gene_ids(gene_list))
-    origin <- "user-supplied gene list"
-  }
-  
-  # Keep only genes present in the universe (hypergeometric requirement)
-  n_before <- length(input_genes)
-  input_genes <- intersect(input_genes, universe)
-  if (length(input_genes) < n_before) {
-    message(sprintf(">>> [Note] %d of %d genes are not in the tested universe and were excluded from the ORA.",
-                    n_before - length(input_genes), n_before))
-  }
-  
-  if (length(input_genes) < 5) {
-    warning(sprintf("Only %d genes available for the ORA (%s): too few for a reliable test. ORA not run.",
-                    length(input_genes), origin))
-    return(NULL)
-  }
-  message(sprintf(">>> ORA on %d genes [%s] - universe: %d genes", length(input_genes), origin, length(universe)))
-  
-  # MSigDB gene sets
-  if (is.null(subcategory)) {
-    m_df <- msigdbr(species = species, category = category)
-  } else {
-    m_df <- msigdbr(species = species, category = category, subcategory = subcategory)
-  }
-  term2gene <- m_df %>% dplyr::select(gs_name, gene_symbol) %>% distinct()
-  
-  ora <- clusterProfiler::enricher(
-    gene          = input_genes,
-    universe      = universe,
-    TERM2GENE     = term2gene,
-    pAdjustMethod = "BH",
-    pvalueCutoff  = 1,   # no internal filter: the significance cutoff is handled downstream
-    qvalueCutoff  = 1,
-    minGSSize     = min_size,
-    maxGSSize     = max_size
-  )
-  
-  if (is.null(ora) || nrow(ora@result) == 0) {
-    warning("No testable pathway for the ORA with these parameters.")
-    return(NULL)
-  }
-  
-  ora_res <- ora@result %>%
-    mutate(
-      GeneRatioNum = sapply(strsplit(GeneRatio, "/"), function(x) as.numeric(x[1]) / as.numeric(x[2])),
-      BgRatioNum   = sapply(strsplit(BgRatio, "/"), function(x) as.numeric(x[1]) / as.numeric(x[2])),
-      FoldEnrichment = GeneRatioNum / BgRatioNum
-    ) %>%
-    arrange(p.adjust, pvalue)
-  
-  # Direction: ORA does NOT provide it (it is a test on an unordered set of genes). We derive it a posteriori
-  # by counting, among the genes supporting each pathway, how many have log2FC > 0 (UP) and how many < 0 (DOWN) in the DEA.
-  lfc_lookup <- setNames(res_tbl$log2FoldChange, res_tbl$GeneID)
-  dir_counts <- lapply(strsplit(ora_res$geneID, "/"), function(g) {
-    l <- lfc_lookup[g]
-    c(up = sum(l > 0, na.rm = TRUE), down = sum(l < 0, na.rm = TRUE))
-  })
-  ora_res$N_UP   <- unname(sapply(dir_counts, `[`, "up"))
-  ora_res$N_DOWN <- unname(sapply(dir_counts, `[`, "down"))
-  frac_up <- ora_res$N_UP / pmax(ora_res$N_UP + ora_res$N_DOWN, 1)
-  ora_res$Direction <- case_when(frac_up >= 0.8 ~ "UP", frac_up <= 0.2 ~ "DOWN", TRUE ~ "MIXED")
-  
-  attr(ora_res, "n_input_genes") <- length(input_genes)
-  attr(ora_res, "origin") <- origin
-  
-  return(ora_res)
-}
+    write(toJSON(out, auto_unbox = TRUE, pretty = TRUE),
+          file.path(out_dir, "groups.json"))
+    cat("OK\n")
 
-# ORA plot. Two modes:
-# - type = "bar" (default): significance is the LENGTH of the bar (-log10 padj), i.e. a position on a common axis,
-#   which is the most precise and least subjective visual encoding. Each bar explicitly reports k/K, fold enrichment and padj.
-# - type = "dot": classic dotplot (colour = padj, size = n. genes), kept for comparison.
-plot_ora <- function(ora_res, type = c("bar", "dot"), top_n = 20, padj_cutoff = 0.05,
-                     title = "Top Enriched Pathways (ORA)") {
-  type <- match.arg(type)
-  if (is.null(ora_res) || nrow(ora_res) == 0) {
-    warning("No ORA results to plot.")
-    return(invisible(NULL))
-  }
-  
-  n_signif <- sum(ora_res$p.adjust < padj_cutoff, na.rm = TRUE)
-  
-  if (n_signif == 0) {
-    warning(sprintf("No pathway has padj < %.2f. Showing the top %d pathways by p-value anyway (not significant, exploratory use only).",
-                     padj_cutoff, top_n))
-    plot_data <- ora_res %>% head(top_n)
-    subtitle_txt <- "No significant pathway (exploratory only)"
-  } else {
-    if (n_signif < top_n) {
-      message(sprintf(">>> Only %d of the %d requested pathways have padj < %.2f. Showing only those.",
-                       n_signif, top_n, padj_cutoff))
+  # MODE 2: run_dea
+  # Runs the full pipeline (import -> DEA -> table -> GSEA), reusing EXACTLY the functions from DE_scheletro_FINALE.Rmd.
+  } else if (cfg$mode == "run_dea") {
+
+    is_micro <- identical(cfg$method, "Microarray")
+
+    # Organism (Homo sapiens / Mus musculus / Rattus norvegicus / Danio rerio): drives ID -> symbol conversion
+    # and the MSigDB gene sets. get_species_info() stops with a clear message if the species is not supported.
+    species <- cfg$species %||% "Homo sapiens"
+    get_species_info(species)
+    message(">>> Species: ", species)
+
+    # The low-expression filter is now configured through globals of the Rmd (section 1b):
+    # the GUI value is the minimum TOTAL counts per gene.
+    assign("FILTER_MIN_TOTAL_COUNTS", as.numeric(cfg$min_counts %||% 10), envir = globalenv())
+
+    counts <- import_expression(cfg$counts_path,
+                                 gene_col = cfg$gene_col,
+                                 is_microarray = is_micro,
+                                 species = species)
+    metadata <- import_metadata(cfg$metadata_path,
+                                 sample_col = cfg$sample_col,
+                                 condition_col = cfg$condition_col)
+
+    # --- Optional gene filter: keep ONLY the genes typed by the user (case-insensitive match on the gene symbols).
+    gene_filter_active <- FALSE
+    if (length(cfg$gene_list) > 0) {
+      wanted <- unique(trimws(as.character(unlist(cfg$gene_list))))
+      wanted <- wanted[nzchar(wanted)]
+      hit <- match(toupper(wanted), toupper(rownames(counts)))
+      not_found <- wanted[is.na(hit)]
+      if (length(not_found) > 0) {
+        message(">>> [Note] Genes not found in the dataset (ignored): ",
+                paste(not_found, collapse = ", "))
+      }
+      hit <- unique(hit[!is.na(hit)])
+      if (length(hit) < 2) {
+        .fail(out_dir, paste0("At least 2 of the requested genes must be present in the dataset. ",
+                              "Found: ", length(hit), "."))
+      }
+      counts <- counts[hit, , drop = FALSE]
+      gene_filter_active <- TRUE
+      message(">>> Analysis restricted to ", nrow(counts), " genes.")
     }
-    plot_data <- ora_res %>% filter(p.adjust < padj_cutoff) %>% head(top_n)
-    subtitle_txt <- sprintf("Pathways with padj < %.2f", padj_cutoff)
-  }
-  
-  n_in <- attr(ora_res, "n_input_genes")
-  if (!is.null(n_in)) subtitle_txt <- paste0(subtitle_txt, " | input genes: ", n_in)
-  
-  plot_data <- plot_data %>%
-    mutate(
-      Description = gsub("^HALLMARK_", "", ID),
-      Description = gsub("^GOBP_", "", Description),
-      Description = gsub("_", " ", Description),
-      SetSize     = as.numeric(sub("/.*$", "", BgRatio)),          # K: pathway genes present in the universe
-      neglog10    = -log10(pmax(p.adjust, 1e-300)),                 # avoids Inf if padj = 0
-      Label   = sprintf("%d/%d genes (%d UP, %d DOWN) | FE %.1f | padj %.1e",
-                            Count, SetSize, N_UP, N_DOWN, FoldEnrichment, p.adjust),
-      Description = reorder(Description, neglog10)
-    )
-  
-  if (type == "bar") {
-    ggplot(plot_data, aes(x = neglog10, y = Description, fill = Direction)) +
-      geom_col(width = 0.7) +
-      scale_fill_manual(values = c("UP" = "firebrick", "DOWN" = "steelblue", "MIXED" = "grey60"),
-                        name = "Direction\n(>= 80% of genes)") +
-      geom_text(aes(label = Label), hjust = -0.05, size = 3) +
-      geom_vline(xintercept = -log10(padj_cutoff), linetype = "dashed", color = "firebrick") +
-      scale_x_continuous(expand = expansion(mult = c(0, 0.45))) +
-      labs(x = expression(-log[10]~"(padj)"), y = NULL, title = title,
-           subtitle = subtitle_txt,
-           caption = sprintf("Dashed line: padj = %.2f | k/K = input genes / pathway genes in the universe | FE = fold enrichment", padj_cutoff)) +
-      theme_minimal() +
-      theme(axis.text.y = element_text(size = 9, face = "bold"),
-            panel.grid.major.y = element_blank())
+
+    # --- Exploratory PCA: we extract only the underlying data (p$data) and the axis labels so it can be redrawn interactively in Python.
+    # With a single contrast, the PCA also uses only the 2 selected groups (with "pairwise_all" all groups are kept).
+    pca_counts <- counts
+    pca_meta <- metadata
+    if (!isTRUE(cfg$pairwise_all) && length(cfg$contrast) == 2) {
+      sel <- rownames(metadata)[as.character(metadata$condition) %in% as.character(cfg$contrast)]
+      sel <- intersect(sel, colnames(counts))
+      pca_counts <- counts[, sel, drop = FALSE]
+      pca_meta <- metadata[sel, , drop = FALSE]
+    }
+    p_pca <- plot_universal_pca(pca_counts, pca_meta, title = "PCA of Count Data")
+    write.csv(p_pca$data, file.path(out_dir, "pca_data.csv"), row.names = FALSE)
+    write(toJSON(list(x_label = p_pca$labels$x, y_label = p_pca$labels$y),
+                 auto_unbox = TRUE),
+          file.path(out_dir, "pca_labels.json"))
+
+    padj_cutoff <- cfg$padj_cutoff %||% 0.05
+    gsea_category <- cfg$gsea_category %||% "H"
+    gsea_subcategory <- cfg$gsea_subcategory %||% NULL
+    lfc_cutoff <- cfg$lfc_cutoff %||% 1
+    run_ora <- isTRUE(cfg$run_ora %||% TRUE)
+    ora_direction <- cfg$ora_direction %||% "all"
+
+    # The model is fitted ONCE (design ~ condition on all samples: identical to what each single contrast used to
+    # re-fit) and then every contrast is extracted from it. The same fit gives the normalized matrix for the gene plots.
+    if (!isTRUE(cfg$pairwise_all)) validate_contrast(metadata, as.character(cfg$contrast))
+    model <- fit_dea_model(counts, metadata, method = cfg$method)
+
+    # Normalized expression (log2 scale) of every gene in every sample: used by the "Gene counts" plots in the GUI.
+    tryCatch({
+      norm_mat <- prepare_normalized_matrix(model, norm = "norm_counts")
+      scale_label <- attr(norm_mat, "scale_label") %||% "Expression (log2)"
+      norm_df <- cbind(GeneID = rownames(norm_mat),
+                       as.data.frame(round(as.matrix(norm_mat), 4), check.names = FALSE),
+                       stringsAsFactors = FALSE)
+      data.table::fwrite(norm_df, file.path(out_dir, "norm_matrix.csv"))
+      write(toJSON(list(scale_label = scale_label), auto_unbox = TRUE), file.path(out_dir, "norm_meta.json"))
+    }, error = function(e) {
+      message(">>> [Note] Normalized matrix not exported (gene plots unavailable): ", conditionMessage(e))
+    })
+
+    run_one <- function(contrast, tag) {
+      res_tbl <- extract_dea_results(model, contrast = contrast)
+      write.csv(res_tbl, file.path(out_dir, paste0("res_tbl_", tag, ".csv")),
+                row.names = FALSE)
+
+      ranked <- generate_ranked_gene_table(res_tbl, padj_cutoff = padj_cutoff)
+      write.csv(ranked, file.path(out_dir, paste0("ranked_", tag, ".csv")),
+                row.names = FALSE)
+
+      # With a user-defined gene list, ORA/GSEA are not meaningful (too few genes): they are skipped.
+      if (gene_filter_active) {
+        write(toJSON(list(available = FALSE, direction = cfg$ora_direction %||% "all",
+                          note = "ORA/GSEA skipped: analysis restricted to a user-defined gene list."),
+                     auto_unbox = TRUE),
+              file.path(out_dir, paste0("ora_meta_", tag, ".json")))
+        return(invisible(NULL))
+      }
+
+      # --- ORA (Over-Representation Analysis) ---
+      # Same cutoffs (padj / log2FC) and same MSigDB category as the GSEA.
+      if (run_ora) {
+        ora_note <- NULL
+        ora_res <- tryCatch({
+          withCallingHandlers(
+            run_ora_analysis(res_tbl, direction = ora_direction,
+                             padj_cutoff = padj_cutoff, lfc_cutoff = lfc_cutoff,
+                             category = gsea_category, subcategory = gsea_subcategory,
+                             species = species),
+            warning = function(w) {
+              ora_note <<- conditionMessage(w)
+              message(">>> [Note] ORA '", tag, "': ", conditionMessage(w))
+              invokeRestart("muffleWarning")
+            })
+        }, error = function(e) {
+          ora_note <<- conditionMessage(e)
+          message(">>> [Note] ORA failed for '", tag, "': ", conditionMessage(e))
+          NULL
+        })
+
+        ora_meta <- list(available = FALSE, direction = ora_direction, note = "")
+        if (!is.null(ora_res) && nrow(ora_res) > 0) {
+          ora_meta$available <- TRUE
+          ora_meta$n_input_genes <- attr(ora_res, "n_input_genes")
+          ora_meta$origin <- attr(ora_res, "origin")
+          write.csv(as.data.frame(ora_res),
+                    file.path(out_dir, paste0("ora_", tag, ".csv")), row.names = FALSE)
+        } else {
+          ora_meta$note <- ora_note %||% "No ORA results."
+        }
+        write(toJSON(ora_meta, auto_unbox = TRUE),
+              file.path(out_dir, paste0("ora_meta_", tag, ".json")))
+      }
+
+      gsea_ok <- TRUE
+      gsea_res <- tryCatch({
+        run_gsea_analysis(res_tbl, category = gsea_category, subcategory = gsea_subcategory,
+                          species = species)
+      }, error = function(e) {
+        message(">>> [Note] GSEA failed for '", tag, "': ", conditionMessage(e))
+        gsea_ok <<- FALSE
+        NULL
+      })
+      if (gsea_ok && !is.null(gsea_res)) {
+        gsea_out <- as.data.frame(gsea_res)
+        # leadingEdge is a list-column: we turn it into a string for the CSV
+        if ("leadingEdge" %in% colnames(gsea_out)) {
+          gsea_out$leadingEdge <- vapply(gsea_out$leadingEdge,
+                                          function(x) paste(x, collapse = ";"),
+                                          character(1))
+        }
+        write.csv(gsea_out, file.path(out_dir, paste0("gsea_", tag, ".csv")),
+                  row.names = FALSE)
+      }
+      invisible(NULL)
+    }
+
+    if (isTRUE(cfg$pairwise_all)) {
+      groups <- get_available_groups(metadata)
+      if (length(groups) < 2) {
+        .fail(out_dir, "At least 2 groups are needed for a pairwise comparison.")
+      }
+      pairs <- combn(groups, 2, simplify = FALSE)
+      pair_tags <- character(0)
+      contrast_info <- list()
+      for (p in pairs) {
+        tag <- paste(p[1], "vs", p[2], sep = "_")
+        pair_tags <- c(pair_tags, tag)
+        contrast_info[[length(contrast_info) + 1]] <-
+          list(tag = tag, group_high = p[1], group_low = p[2])
+        run_one(p, tag)
+      }
+      write(toJSON(list(pairs = pair_tags, contrasts = contrast_info), auto_unbox = TRUE),
+            file.path(out_dir, "pairs.json"))
+    } else {
+      contrast <- as.character(cfg$contrast)
+      # The tag now carries the real comparison (e.g. "Drug_vs_Control"), no longer "main".
+      # contrast[1] = test group (numerator), contrast[2] = reference group (denominator).
+      tag <- paste(contrast[1], "vs", contrast[2], sep = "_")
+      run_one(contrast, tag)
+      write(toJSON(list(pairs = tag,
+                        contrasts = list(list(tag = tag, group_high = contrast[1],
+                                              group_low = contrast[2]))),
+                   auto_unbox = TRUE),
+            file.path(out_dir, "pairs.json"))
+    }
+
+    cat("OK\n")
+
   } else {
-    plot_data <- plot_data %>% mutate(Description = reorder(Description, GeneRatioNum))
-    ggplot(plot_data, aes(x = GeneRatioNum, y = Description)) +
-      geom_point(aes(size = Count, color = p.adjust)) +
-      scale_color_gradient(low = "firebrick", high = "steelblue", name = "padj") +
-      scale_size_continuous(name = "N. genes") +
-      labs(x = "Gene Ratio", y = NULL, title = title, subtitle = subtitle_txt) +
-      theme_minimal() +
-      theme(axis.text.y = element_text(size = 9, face = "bold"))
+    .fail(out_dir, paste0("Unrecognized mode: ", cfg$mode))
   }
-}
-```
 
-## 6b. GSEA
-```{r}
-run_gsea_analysis <- function(res_tbl, category = "H", subcategory = NULL, species = "Homo sapiens") {
-  ranks <- res_tbl$stat
-  names(ranks) <- res_tbl$GeneID
-  ranks <- ranks[!is.na(ranks)]
-  ranks <- sort(ranks, decreasing = TRUE)
-  
-  if (is.null(subcategory)) {
-    m_df <- msigdbr(species = species, category = category)
-  } else {
-    m_df <- msigdbr(species = species, category = category, subcategory = subcategory)
-  }
-  
-  pathways <- split(x = m_df$gene_symbol, f = m_df$gs_name)
-  
-  set.seed(42)
-  fgsea_res <- fgseaMultilevel(pathways = pathways, stats = ranks, minSize = 15, maxSize = 500,
-                               BPPARAM = BiocParallel::SerialParam())
-  
-  fgsea_res <- fgsea_res %>%
-    arrange(desc(abs(NES)))
-  
-  return(fgsea_res)
-}
-
-plot_top_pathways <- function(fgsea_res, top_n = 20, padj_cutoff = 0.05, title = "Top Modulated Pathways (GSEA)") {
-  
-  n_signif <- sum(fgsea_res$padj < padj_cutoff, na.rm = TRUE)
-  
-  if (n_signif == 0) {
-    warning(sprintf("No pathway has padj < %.2f. Showing the top %d pathways by absolute NES anyway (not significant, exploratory use only).",
-                     padj_cutoff, top_n))
-    plot_data <- fgsea_res %>% filter(!is.na(NES)) %>% head(top_n)
-  } else if (n_signif < top_n) {
-    message(sprintf(">>> Only %d of the %d requested pathways have padj < %.2f. Showing only those.",
-                     n_signif, top_n, padj_cutoff))
-    plot_data <- fgsea_res %>% filter(!is.na(NES), padj < padj_cutoff)
-  } else {
-    plot_data <- fgsea_res %>% filter(!is.na(NES), padj < padj_cutoff) %>% head(top_n)
-  }
-  
-  plot_data <- plot_data %>%
-    mutate(pathway = gsub("^HALLMARK_", "", pathway)) %>% 
-    mutate(pathway = gsub("^GOBP_", "", pathway)) %>%
-    mutate(pathway = gsub("_", " ", pathway)) %>%
-    mutate(Direction = ifelse(NES > 0, "Up-regulated", "Down-regulated")) %>%
-    mutate(pathway = reorder(pathway, NES))
-  
-  ggplot(plot_data, aes(x = NES, y = pathway, fill = Direction)) +
-    geom_col() +
-    scale_fill_manual(values = c("Up-regulated" = "firebrick", "Down-regulated" = "steelblue")) +
-    labs(x = "Normalized Enrichment Score (NES)", y = NULL,
-         title = title,
-         subtitle = sprintf("Pathways with padj < %.2f", padj_cutoff)) +
-    theme_minimal() +
-    theme(
-      axis.text.y = element_text(size = 9, face = "bold"),
-      legend.position = "bottom"
-    )
-}
-```
-
-# 7. SIMULATION AND FULL TEST
-```{r}
-# --- PIPELINE START ---
-
-# 1. Data loading
-counts <- import_expression("C:\\Users\\maran\\Downloads\\counts_test.tsv", gene_col = 1, is_microarray = FALSE)
-metadata <- import_metadata("C:\\Users\\maran\\Downloads\\metadata_test.tsv", sample_col = 1, condition_col = 2)
-
-# Extraction of available groups -> the user picks the two groups to compare here 
-available_groups <- get_available_groups(metadata)
-
-# 2. Exploratory PCA Plot
-print(plot_universal_pca(counts, metadata, title = "PCA of Count Data"))
-
-# 3. Differential Analysis
-# The user chooses the contrast among the groups printed above in available_groups. If the chosen groups do not exist, validate_contrast() stops execution with a message.
-res_tbl <- run_differential_expression(counts, metadata, method = "RNAseq", contrast = c("Drug", "Control"))
-
-# 3b. (Optional) If there are more than 2 groups and ALL pairwise comparisons are wanted:
-# all_comparisons <- run_all_pairwise_comparisons(counts, metadata, method = "RNAseq")
-# all_comparisons[["Drug vs Control"]]  # access a specific comparison
-
-# 4. Volcano Plot
-print(plot_universal_volcano(res_tbl, title = "Volcano Plot - Output Standardizzato"))
-
-# 5. Gene Table Generation and Export
-cat("\n>>> GENERATING THE SORTED GENERAL RESULTS TABLE <<<\n")
-risultati_ordinati <- generate_ranked_gene_table(res_tbl)
-print(head(risultati_ordinati, 10))
-write.csv(risultati_ordinati, "Risultati_Finali_DE_Ranked.csv", row.names = FALSE)
-
-# 6. ORA (Over-Representation Analysis) - run BEFORE the GSEA, but not an alternative to it
-cat("\n>>> Running ORA on the Hallmark pathways (MSigDB)...\n")
-
-# 6a. ORA on the DEGs (UP + DOWN together) selected with the padj and log2FC cutoffs
-ora_results <- run_ora_analysis(res_tbl, direction = "all",
-                                padj_cutoff = 0.05, lfc_cutoff = 1, category = "H")
-
-if (!is.null(ora_results)) {
-  print(head(ora_results %>% dplyr::select(ID, Count, GeneRatio, BgRatio, FoldEnrichment, pvalue, p.adjust), 10))
-  write.csv(ora_results, "Risultati_ORA.csv", row.names = FALSE)
-  print(plot_ora(ora_results, top_n = 15, title = "Top 15 Enriched Pathways (ORA - Hallmark)"))
-}
-
-# 6b. (Optional) Separate ORA for UP and DOWN genes
-# ora_up   <- run_ora_analysis(res_tbl, direction = "up",   category = "H")
-# ora_down <- run_ora_analysis(res_tbl, direction = "down", category = "H")
-# print(plot_ora(ora_up,   title = "ORA - UP-regulated genes"))
-# print(plot_ora(ora_down, title = "ORA - DOWN-regulated genes"))
-
-# 6c. (Optional) ORA on a list of specific genes chosen by the user
-# genes_of_interest <- c("TP53", "MYC", "CDKN1A", "BAX", "MDM2", "CCND1", "E2F1", "BCL2")
-# ora_custom <- run_ora_analysis(res_tbl, gene_list = genes_of_interest, category = "H")
-# print(plot_ora(ora_custom, title = "ORA - genes of interest"))
-
-# 7. GSEA Analysis and Pathway Plot
-cat("\n>>> Running FGSEA on the Hallmark pathways (MSigDB)...\n")
-gsea_results <- run_gsea_analysis(res_tbl, category = "H")
-
-print(plot_top_pathways(gsea_results, top_n = 15, title = "Top 15 Modulated Pathways (Hallmark)"))
-```
+}, error = function(e) {
+  .fail(out_dir, conditionMessage(e))
+})
