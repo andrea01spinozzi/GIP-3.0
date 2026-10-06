@@ -19,7 +19,12 @@ library(jsonlite)
   return(getwd())
 }
 
-# --- Extracts ONLY the functions (blocks 1-6) from DE_scheletro_FINALE.Rmd
+# --- Extracts ONLY the function definitions from DE_scheletro_FINALE.Rmd.
+# Main sections (lines starting with a single "# N.") are loaded EXCEPT:
+#   7 ("SIMULATION AND FULL TEST")  and  9 ("USAGE EXAMPLE"): demo code with hardcoded paths / objects.
+# Section 8 (expression vs metadata plots) only defines functions, so it is loaded.
+.SKIP_SECTIONS <- c(7L, 9L)
+
 .load_core_functions <- function(core_path) {
   if (!file.exists(core_path)) {
     stop("File DE_scheletro_FINALE.Rmd not found at: ", core_path)
@@ -27,22 +32,21 @@ library(jsonlite)
   raw_lines <- readLines(core_path, warn = FALSE, encoding = "UTF-8")
 
   in_chunk <- FALSE
-  stop_extraction <- FALSE
+  skip_section <- FALSE
   code_lines <- character(0)
 
   for (ln in raw_lines) {
     trimmed <- trimws(ln)
 
-    # Block 7 ("SIMULATION AND FULL TEST") only contains a demo with
-    # hardcoded paths: from here on we extract nothing more.
-    if (grepl("^#\\s*7\\.", trimmed)) {
-      stop_extraction <- TRUE
+    # Section headings are only looked for OUTSIDE code chunks (inside chunks "# 7." etc. are plain comments)
+    if (!in_chunk) {
+      m <- regmatches(trimmed, regexec("^#\\s*([0-9]+)\\.", trimmed))[[1]]
+      if (length(m) == 2) skip_section <- as.integer(m[2]) %in% .SKIP_SECTIONS
     }
-    if (stop_extraction) next
 
     if (grepl("^```\\{r", trimmed)) { in_chunk <- TRUE; next }
     if (in_chunk && trimmed == "```") { in_chunk <- FALSE; next }
-    if (in_chunk) code_lines <- c(code_lines, ln)
+    if (in_chunk && !skip_section) code_lines <- c(code_lines, ln)
   }
 
   if (length(code_lines) == 0) {
@@ -109,9 +113,20 @@ tryCatch({
 
     is_micro <- identical(cfg$method, "Microarray")
 
+    # Organism (Homo sapiens / Mus musculus / Rattus norvegicus / Danio rerio): drives ID -> symbol conversion
+    # and the MSigDB gene sets. get_species_info() stops with a clear message if the species is not supported.
+    species <- cfg$species %||% "Homo sapiens"
+    get_species_info(species)
+    message(">>> Species: ", species)
+
+    # The low-expression filter is now configured through globals of the Rmd (section 1b):
+    # the GUI value is the minimum TOTAL counts per gene.
+    assign("FILTER_MIN_TOTAL_COUNTS", as.numeric(cfg$min_counts %||% 10), envir = globalenv())
+
     counts <- import_expression(cfg$counts_path,
                                  gene_col = cfg$gene_col,
-                                 is_microarray = is_micro)
+                                 is_microarray = is_micro,
+                                 species = species)
     metadata <- import_metadata(cfg$metadata_path,
                                  sample_col = cfg$sample_col,
                                  condition_col = cfg$condition_col)
@@ -160,11 +175,26 @@ tryCatch({
     run_ora <- isTRUE(cfg$run_ora %||% TRUE)
     ora_direction <- cfg$ora_direction %||% "all"
 
+    # The model is fitted ONCE (design ~ condition on all samples: identical to what each single contrast used to
+    # re-fit) and then every contrast is extracted from it. The same fit gives the normalized matrix for the gene plots.
+    if (!isTRUE(cfg$pairwise_all)) validate_contrast(metadata, as.character(cfg$contrast))
+    model <- fit_dea_model(counts, metadata, method = cfg$method)
+
+    # Normalized expression (log2 scale) of every gene in every sample: used by the "Gene counts" plots in the GUI.
+    tryCatch({
+      norm_mat <- prepare_normalized_matrix(model, norm = "norm_counts")
+      scale_label <- attr(norm_mat, "scale_label") %||% "Expression (log2)"
+      norm_df <- cbind(GeneID = rownames(norm_mat),
+                       as.data.frame(round(as.matrix(norm_mat), 4), check.names = FALSE),
+                       stringsAsFactors = FALSE)
+      data.table::fwrite(norm_df, file.path(out_dir, "norm_matrix.csv"))
+      write(toJSON(list(scale_label = scale_label), auto_unbox = TRUE), file.path(out_dir, "norm_meta.json"))
+    }, error = function(e) {
+      message(">>> [Note] Normalized matrix not exported (gene plots unavailable): ", conditionMessage(e))
+    })
+
     run_one <- function(contrast, tag) {
-      res_tbl <- run_differential_expression(counts, metadata,
-                                              method = cfg$method,
-                                              contrast = contrast,
-                                              min_counts = cfg$min_counts %||% 10)
+      res_tbl <- extract_dea_results(model, contrast = contrast)
       write.csv(res_tbl, file.path(out_dir, paste0("res_tbl_", tag, ".csv")),
                 row.names = FALSE)
 
@@ -189,7 +219,8 @@ tryCatch({
           withCallingHandlers(
             run_ora_analysis(res_tbl, direction = ora_direction,
                              padj_cutoff = padj_cutoff, lfc_cutoff = lfc_cutoff,
-                             category = gsea_category, subcategory = gsea_subcategory),
+                             category = gsea_category, subcategory = gsea_subcategory,
+                             species = species),
             warning = function(w) {
               ora_note <<- conditionMessage(w)
               message(">>> [Note] ORA '", tag, "': ", conditionMessage(w))
@@ -217,7 +248,8 @@ tryCatch({
 
       gsea_ok <- TRUE
       gsea_res <- tryCatch({
-        run_gsea_analysis(res_tbl, category = gsea_category, subcategory = gsea_subcategory)
+        run_gsea_analysis(res_tbl, category = gsea_category, subcategory = gsea_subcategory,
+                          species = species)
       }, error = function(e) {
         message(">>> [Note] GSEA failed for '", tag, "': ", conditionMessage(e))
         gsea_ok <<- FALSE
