@@ -12,6 +12,7 @@ from matplotlib.patches import Rectangle, Patch
 
 import core_calcolo as engine
 import pca_coloring as pcol
+import gene_plots as gplot
 
 A4 = (8.27, 11.69)
 C = {
@@ -217,6 +218,7 @@ def _page_cover(w: _Writer, results, params: dict, stats: dict, generated: str):
         ora_txt = f"Run on: {params.get('ora_direction', 'all DEGs')}"
     items = [
         ("Statistical method", method_txt),
+        ("Organism", params.get("species") or engine.DEFAULT_SPECIES),
         ("Comparison", comp),
         ("padj cutoff", f"{params.get('padj_cutoff', '?')}"),
         ("|log2FC| cutoff", f"{params.get('lfc_cutoff', '?')}"),
@@ -351,6 +353,48 @@ def _page_pca(w: _Writer, results, params: dict | None = None):
         rows = rows[:13] + [[f"... {len(rows) - 13} other groups", str(rest)]]
     y = _section(fig, f"Samples per group ({head})", 0.37)
     _table(fig, rows, [head, "Samples"], [0.7, 0.3], y, w=0.5)
+    w.save(fig)
+
+
+def _page_gene_plot(w: _Writer, results, params: dict):
+    """Optional page: expression of one gene in each sample vs a metadata column (Gene counts tab)."""
+    cfg = params.get("gene_plot") or {}
+    nm = getattr(results, "norm_matrix", None)
+    if not cfg.get("gene") or not cfg.get("variable") or nm is None:
+        return
+    fig = w.new("Gene counts vs metadata", f"{cfg['gene']}: normalized expression in each sample")
+    try:
+        meta = pcol.read_metadata(params.get("metadata_file", ""))
+        scol = engine_col(params.get("sample_col", "1"))
+        frame = gplot.build_frame(nm, meta, scol, cfg["gene"], cfg["variable"], cfg.get("kind", "Auto"))
+        spec = gplot.color_spec_for(frame, meta, scol, cfg.get("color_by"), cfg.get("color_kind", "Auto"),
+                                    bool(cfg.get("colorblind", False)), cfg.get("cmap", "Red → Blue"))
+    except Exception as exc:
+        _note_page_text(fig, f"Gene plot not available: {exc}")
+        w.save(fig)
+        return
+    ax = fig.add_axes([0.14, 0.42, 0.68 if spec["mode"] == "numeric" else 0.80, 0.46])
+    artists, stats, extra = gplot.draw_gene_plot(ax, frame, spec, getattr(results, "norm_label", "Expression"),
+                                                 size=45, alpha=0.85, title=cfg["gene"],
+                                                 show_sample_labels=len(frame["df"]) <= 40 and bool(cfg.get("labels")),
+                                                 show_trend=bool(cfg.get("trend")))
+    if spec["mode"] == "numeric":
+        cax = fig.add_axes([0.86, 0.42, 0.02, 0.46])
+        cb = fig.colorbar(spec["_mappable"], cax=cax)
+        cb.set_label(spec["column"], fontsize=8)
+        cb.ax.tick_params(labelsize=7)
+        if extra:
+            from matplotlib.lines import Line2D
+            ax.legend(handles=[Line2D([], [], marker="o", ls="", markerfacecolor=c, markeredgecolor="black",
+                                      label=l) for l, c in extra], fontsize=7, frameon=False)
+    elif not spec.get("uniform"):
+        ax.legend(title=spec["column"], fontsize=7, title_fontsize=8, frameon=False)
+    ax.grid(alpha=0.25)
+    _style_axes(ax)
+    colored = "single colour" if spec.get("uniform") else f"colored by '{spec['column']}'"
+    _paragraph(fig, f"Each point is a sample (n = {stats['n']}); points {colored}. Expression = "
+                    f"{getattr(results, 'norm_label', 'normalized expression')}; exploratory scale, not the input "
+                    "of the differential expression test.", 0.34, width=110, fs=7.5, color=C["muted"])
     w.save(fig)
 
 
@@ -592,6 +636,7 @@ def build_report(path: str, results, params: dict | None = None, log_text: str =
         _page_cover(w, results, params, stats, generated)
         _page_guide(w)
         _page_pca(w, results, params)
+        _page_gene_plot(w, results, params)
         for tag, res in results.per_contrast.items():
             s = stats[tag]
             _page_volcano(w, res, s, params)
