@@ -16,7 +16,7 @@ def main():
         print("The app will launch anyway; you can correct the environment and try again from the GUI.\n")
 
     try:
-        import gui
+        import gui_qt as gui
     except Exception as e:
         print("Critical error: unable to import gui.py:", e)
         print("Verify that tkinter, matplotlib, and pandas are installed. "
@@ -30,3 +30,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
