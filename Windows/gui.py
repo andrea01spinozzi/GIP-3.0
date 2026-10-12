@@ -1,2434 +1,782 @@
 from __future__ import annotations
+import datetime
 import json
 import math
-import re
 import os
-import threading
+import re
+import sys
+import textwrap
 import time
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext, colorchooser, simpledialog
-import ctypes
-import datetime
-import webbrowser
 from pathlib import Path
+import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use("TkAgg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from matplotlib import transforms
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.figure import Figure
-
-try:
-    import mplcursors
-    HAS_MPLCURSORS = True
-except ImportError:
-    HAS_MPLCURSORS = False
-
-try:
-    from tkinterdnd2 import DND_FILES, TkinterDnD
-    HAS_DND = True
-except ImportError:
-    HAS_DND = False
-
+from PySide6.QtCore import QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QCursor, QDesktopServices, QGuiApplication, QFont, QFontDatabase, QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
+                               QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QRadioButton,
+                               QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableView,
+                               QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 import core_calcolo as engine
-import pca_coloring as pcol
 import gene_plots as gplot
+import pca_coloring as pcol
 import report_pdf
+from help_content import HELP_CONTENT
+from qt_models import DataFrameModel
+from qt_plots import HAS_MPLCURSORS, PlotPanel, confidence_ellipse
+from qt_theme import (PALETTE, Card, Chip, ColorSwatch, DropZone, NavButton, RefreshCombo, Toast, apply_theme,
+                      fade_in, field, open_file_dialog, repolish, MONO)
 
-
-PALETTE = {
-    "bg": "#f4f8fc",            
-    "bg_card": "#ffffff",  
-    "accent": "#123c63",    
-    "accent_light": "#2f74ad",
-    "accent_pale": "#d7e6f2",
-    "accent_pale_2": "#eaf1f8",
-    "accent_soft": "#5b9bd5",  
-    "text": "#1b2b3a",
-    "muted": "#8a97a3",
-    "border": "#d7e3ee",
-    "border_strong": "#b7cee2",
-    "up": "#c0392b",
-    "down": "#2471a3",
-    "ns": "#999b9d",
-    "ok": "#1e8449",
-    "warn": "#b9770e",
-    "err": "#c0392b",
-    "drop_active": "#eaf6ee",
-}
-
-OKABE_ITO = ["#E69F00", "#56B4E9", "#009E73", "#F0E442",
-             "#0072B2", "#D55E00", "#CC79A7", "#000000"]
-
-FONT_BASE = ("Trebuchet MS", 10)
-FONT_BOLD = ("Trebuchet MS", 10, "bold")
-FONT_SMALL = ("Trebuchet MS", 9)
-FONT_HEADER = ("Trebuchet MS", 16, "bold")
-FONT_SUBHEADER = ("Trebuchet MS", 10)
-FONT_MONO = ("Consolas", 9)
-
-LEGEND_POSITIONS = ["best", "upper right", "upper left", "lower left", "lower right",
-                     "center left", "center right", "upper center", "lower center", "outside"]
-
-EXPORT_PRESETS = {
-    "Custom": None,
-    "Single column (89 mm)": (89 / 25.4, 89 / 25.4 * 0.75),
-    "1.5 column (140 mm)": (140 / 25.4, 140 / 25.4 * 0.62),
-    "Double column (183 mm)": (183 / 25.4, 183 / 25.4 * 0.5),
-    "Square 10x10 cm": (10 / 2.54, 10 / 2.54),
-    "Slide 16:9 (25.4x14.3 cm)": (10.0, 5.63),
-}
-
-HELP_CONTENT = {
-    "setup": {
-        "title": "Help — Setup & Parameters",
-        "meaning": (
-            "This tab prepares the Differential Expression Analysis (DEA): the "
-            "statistical comparison of expression levels for each gene between two "
-            "conditions (e.g. 'Treated' vs 'Control', or 'Responder' vs "
-            "'Non-responder').\n\n"
-            "What you need:\n"
-            "- The COUNTS file: a gene (rows) x sample (columns) table. For RNA-seq "
-            "these must be raw counts (integers, e.g. the number of reads aligned to "
-            "each gene), NOT already normalized values (TPM/FPKM), because DESeq2 "
-            "applies its own statistical normalization.\n"
-            "- The METADATA file: a table linking each sample (same ID column as the "
-            "counts) to its experimental condition (e.g. treatment group).\n\n"
-            "Statistical method:\n"
-            "- DESeq2 (Wald test): models counts with a negative binomial "
-            "distribution, suited to the typical noise of sequencing data (variance "
-            "growing faster than the mean). It is the correct choice for raw RNA-seq "
-            "counts.\n"
-            "- limma (eBayes): designed for continuous, already log-transformed "
-            "intensity data such as microarrays; it uses Bayesian moderation of "
-            "variance to stabilize the estimate when there are few samples per "
-            "group.\n\n"
-            "Parameters:\n"
-            "- padj cutoff: threshold on the multiple-testing CORRECTED p-value "
-            "(typically via the Benjamini-Hochberg/FDR method). It is needed because "
-            "when testing thousands of genes in parallel, some small p-values would "
-            "arise purely by chance: padj keeps the expected proportion of false "
-            "positives under control. Example: with padj<0.05 you accept that, on "
-            "average, 5% of genes declared significant might not really be so.\n"
-            "- log2FoldChange cutoff: threshold on the magnitude of change. log2FC=1 "
-            "corresponds to a doubling of expression; log2FC=-1 to a halving. A gene "
-            "can be statistically significant but with a biologically negligible "
-            "change: this cutoff is used to discard those cases.\n"
-            "- MSigDB category (for the subsequent GSEA): 'H' (Hallmark) groups a few "
-            "dozen well-characterized and coherent gene sets (e.g. the KRAS signaling "
-            "pathway, EMT, inflammatory response); other categories (C2 = curated "
-            "pathways such as KEGG/Reactome, C5 = Gene Ontology, etc.) are more "
-            "granular or specific.\n"
-            "- ORA (Over-Representation Analysis): runs alongside the GSEA, with the "
-            "same MSigDB category and the same padj / log2FC cutoffs. You can turn it "
-            "off and choose which genes it uses: all DEGs (up + down), only "
-            "up-regulated or only down-regulated ones."
-        ),
-        "usage": (
-            "1. Press 'Browse...' to select the counts file and the metadata file "
-            "(accepts csv/tsv/txt/xlsx/xls/json).\n"
-            "2. Check/correct the column indices or names (genes, samples, "
-            "condition): you can enter either a number (1 = first column) or the "
-            "exact column name.\n"
-            "3. Choose the correct statistical method based on the data type "
-            "(RNA-seq -> DESeq2, microarray -> limma).\n"
-            "4. Press 'Extract groups from metadata': the list of conditions found "
-            "will appear, with the corresponding number of samples (n=...).\n"
-            "5. Check EXACTLY 2 groups to compare, or enable the 'Compare ALL pairs "
-            "of groups (pairwise)' checkbox if you want all possible contrasts at "
-            "once (in that case the individual group checkboxes are disabled).\n"
-            "6. Set the padj cutoff, log2FC cutoff, and MSigDB category for the "
-            "GSEA and ORA (tick/untick 'Run ORA' and pick which genes it should use).\n"
-            "7. The 'Preparation status' panel at the top and the red borders on "
-            "required fields show you what is still missing; the 'Run analysis' "
-            "button is enabled only once both counts and metadata have been "
-            "selected.\n"
-            "8. Press 'Run analysis': the progress bar and timer show that the "
-            "computation (DESeq2/limma + GSEA in R) is running; when finished you "
-            "are automatically switched to the PCA tab.\n"
-            "9. 'Reset fields' clears the whole file/columns/groups section so you "
-            "can start over.\n"
-            "10. Once the analysis has finished, 'Download PDF report' saves a "
-            "detailed report (parameters, PCA, volcano plot, top DEGs, GSEA, ORA "
-            "and the processing log for every contrast) as a PDF file."
-        ),
-    },
-    "pca": {
-        "title": "Help — PCA",
-        "meaning": (
-            "PCA (Principal Component Analysis) is a statistical technique that "
-            "reduces the thousands of genes measured for each sample to a few "
-            "'principal components' (PC1, PC2, ...), linear combinations of genes "
-            "chosen to capture as much of the data's variability as possible in the "
-            "fewest dimensions.\n\n"
-            "In practice: each point in the chart is a sample (not a gene). If two "
-            "samples have a similar expression profile, their points will be close; "
-            "if they are very different, they will be far apart. PC1 and PC2 report "
-            "in parentheses the percentage of total variance they manage to explain: "
-            "the higher it is, the more faithfully that 2D chart represents the true "
-            "differences between samples (rather than losing information by "
-            "compressing too many dimensions into two).\n\n"
-            "Biological purpose: to check whether samples group according to the "
-            "expected experimental condition (e.g. all 'responders' close together, "
-            "separated from 'non-responders'). If instead the groups do not "
-            "separate, or a sample is isolated far from all the others, this can "
-            "indicate: a batch effect (samples processed on different days/batches), "
-            "a low-quality sample, or simply that condition has no strong "
-            "transcriptomic effect."
-        ),
-        "usage": (
-            "- 'Color by': colors the points by any column of the metadata file "
-            "(age, tumor stage, sex, treatment...). Numeric columns get a continuous "
-            "color scale with a color bar; text columns get one distinct color per "
-            "group, with a legend. Missing values are grey. Use 'Type' to force "
-            "numeric/categorical and 'Scale' to choose the numeric color scale.\n"
-            "- 'Show sample labels': writes the ID of each sample next to its "
-            "point.\n"
-            "- 'Confidence ellipses per group': draws an ellipse around the samples "
-            "of each condition (requires at least 3 samples per group) to better "
-            "visualize separation.\n"
-            "- 'Color-blind-friendly palette': switches the group colors to the "
-            "Okabe-Ito palette, readable even by people with color vision "
-            "deficiencies.\n"
-            "- 'Custom title' + 'Apply': replaces the chart's automatic title.\n"
-            "- Zoom/pan: use the matplotlib toolbar above the chart (the "
-            "magnifying glass and the hand) to zoom into an area or move around.\n\n"
-            "How to add manual annotations (arrows, lines, boxes, text):\n"
-            "1. In the 'Manual annotations' bar, choose the tool: Arrow, Line, Box "
-            "or Text (or 'None' to disable).\n"
-            "2. For Arrow/Line/Box: click on the chart at the starting point and "
-            "drag to the end point, then release the mouse button.\n"
-            "3. For Text: simply click where you want the text, then type the "
-            "content in the window that appears.\n"
-            "4. You can change color (colored button next to 'Color') and line "
-            "width before drawing the next annotation.\n"
-            "5. 'Undo last' removes only the last annotation added; 'Clear all' "
-            "removes all of them.\n"
-            "Note: if you change an option that redraws the chart from scratch "
-            "(e.g. enabling/disabling ellipses), manual annotations are cleared: add "
-            "them last, once the chart is already set up.\n\n"
-            "To export the figure in high resolution (for a paper/poster): press "
-            "'Export image', choose a size preset (single/1.5/"
-            "double column), the file format (PDF/SVG/EPS are vector formats, ideal "
-            "for crisp text and lines; PNG/TIFF are raster), the DPI (300 is the "
-            "minimum standard required by most journals) and press 'Save...'."
-        ),
-    },
-    "volcano": {
-        "title": "Help — Volcano Plot",
-        "meaning": (
-            "The volcano plot combines, for each gene, TWO pieces of information at "
-            "the same time: how much its expression changed (X axis) and how "
-            "statistically reliable that change is (Y axis).\n\n"
-            "- X axis = log2FoldChange: expression change between the two "
-            "conditions on a log2 scale. Example: log2FC = 2 means the gene is "
-            "expressed 4 times more (2^2) in the FIRST group of the contrast (\"A\" in "
-            "\"A vs B\"; B is the reference/denominator); log2FC = -1 "
-            "means expression in A is half of that in B.\n"
-            "- Y axis = -log10(padj): the HIGHER a point is, the lower (hence more "
-            "significant) its padj is. -log10 is used only to make very small "
-            "p-values readable on a chart (e.g. padj = 0.00001 becomes 5 on the Y "
-            "axis).\n\n"
-            "The dashed horizontal and vertical lines mark the cutoffs chosen in the "
-            "Setup tab: a gene is colored as 'Upregulated' or 'Downregulated' only if "
-            "it passes BOTH thresholds (significance AND effect size); otherwise it "
-            "stays gray ('Not Significant'). The typical 'butterfly/volcano' shape of "
-            "the chart arises because genes with more extreme changes (tails on the "
-            "right/left) also tend to be the most significant (points higher up), "
-            "hence the name."
-        ),
-        "usage": (
-            "- 'Contrast': if you ran multiple comparisons (e.g. with the pairwise "
-            "option), choose here which one to display.\n"
-            "- Gene labels: choose the mode ('None', 'All significant genes', 'Top N "
-            "by padj', 'Top N by |log2FC|', 'Specific genes (list)'). With 'Specific "
-            "genes' type the names separated by commas in the field below (e.g. "
-            "TP53, MYC, EGFR). Adjust 'Top N' and 'Font size' as needed; 'Leader "
-            "lines to label' helps readability when there are many labels close "
-            "together.\n"
-            "- Appearance: customize the Up/Down/NS color (click the colored "
-            "square), point size and transparency, and the title.\n"
-            "- After changing a setting, press 'Apply changes' to regenerate the "
-            "chart (there is no need to rerun the whole analysis in R).\n\n"
-            "Manual annotations (arrows/lines/boxes/text): same procedure described "
-            "for PCA — choose the tool in the 'Manual annotations' bar, drag (or "
-            "click for text) directly on the chart. Remember: pressing 'Apply "
-            "changes' redraws the chart and clears manual annotations, so add them "
-            "last.\n\n"
-            "For high-resolution export, use 'Export image' as "
-            "in the PCA tab."
-        ),
-    },
-    "table": {
-        "title": "Help — Gene Table",
-        "meaning": (
-            "This tab shows, in tabular form, the same statistical results as the "
-            "volcano plot: a complete (or filtered) list of genes with the values "
-            "produced by DESeq2/limma.\n\n"
-            "Columns:\n"
-            "- GeneID: gene identifier (symbol, e.g. KRAS, or Ensembl ID if the "
-            "symbol is not available).\n"
-            "- Regulation: states in which group the gene is higher "
-            "(\"Higher in A\" / \"Higher in B\") when it passes the padj AND log2FC "
-            "cutoffs set in the Setup tab; otherwise \"Not significant\". "
-            "The group names are those of the active contrast.\n"
-            "- Significant: indicates whether the gene passes BOTH the padj cutoff "
-            "AND the log2FC cutoff set in the Setup tab (i.e. whether it is colored "
-            "in the volcano plot).\n"
-            "- log2FoldChange: the magnitude of the change on a log2 scale (see the "
-            "Volcano Plot help for details).\n"
-            "- pvalue: the 'raw' statistical significance, BEFORE multiple-testing "
-            "correction.\n"
-            "- padj: the corrected p-value (e.g. Benjamini-Hochberg/FDR method): "
-            "this is the value to use to decide whether a gene is significant, "
-            "never the raw pvalue, because testing thousands of genes together "
-            "would underestimate the false positive rate.\n"
-            "- stat: the test statistic (e.g. the Wald statistic for DESeq2, "
-            "moderated t for limma) from which the pvalue is derived; the sign "
-            "indicates direction, the absolute value the strength of the signal."
-        ),
-        "usage": (
-            "- 'Filter (search GeneID)': type even part of a gene name to filter "
-            "the table in real time (e.g. typing 'KRAS' also shows any related "
-            "genes containing that string).\n"
-            "- Regulation dropdown: shows only genes higher in the first group, "
-            "only genes higher in the second (reference) group, or only "
-            "Not significant ones.\n"
-            "- Click a column header (e.g. 'padj') to sort the table by that "
-            "column; click again to reverse ascending/descending order.\n"
-            "- 'Export CSV...': saves the currently filtered/sorted table to a CSV "
-            "file, useful for further analysis in Excel/R/Python or as "
-            "supplementary material for a paper.\n"
-            "- The number in the bottom right ('N genes shown') updates based on "
-            "the applied filters."
-        ),
-    },
-    "gsea": {
-        "title": "Help — GSEA / Pathway",
-        "meaning": (
-            "GSEA (Gene Set Enrichment Analysis) answers a different question than "
-            "the single-gene one: instead of asking 'did this gene change "
-            "significantly?', it asks 'does an entire group of genes belonging to "
-            "the same biological pathway move coherently in one direction, even if "
-            "each individual gene on its own is not strong enough to be "
-            "significant?'.\n\n"
-            "How it works, briefly: all genes are ranked based on a statistic "
-            "derived from the comparison between the two conditions; for each gene "
-            "set (e.g. 'HALLMARK_KRAS_SIGNALING', a group of genes typically "
-            "activated/modulated when the KRAS signaling pathway is hyperactive) it "
-            "is checked whether its genes cluster unusually toward the top or "
-            "bottom of this ranking, compared to what would be expected by pure "
-            "chance.\n\n"
-            "- NES (Normalized Enrichment Score): the enrichment score, normalized "
-            "for gene set size (so pathways with more or fewer genes are "
-            "comparable). Positive NES = the gene set is shifted toward the most "
-            "genes higher in the FIRST group of the contrast (\"A\" in \"A vs B\"); "
-            "negative NES = toward the genes higher in the SECOND group "
-            "(the reference).\n"
-            "- padj: as for single genes, this is the enrichment p-value corrected "
-            "for the number of gene sets tested together.\n"
-            "- Asterisks (*, **, ***) indicate padj<0.05, <0.01, <0.001 "
-            "respectively, following the most common graphical convention in "
-            "publications.\n\n"
-            "Important point: a significant NES does NOT imply that the individual "
-            "genes of that pathway are significant DEGs one by one (nor that they "
-            "are mutated); it means that the overall pathway pattern, summed over "
-            "many genes that agree even if weak individually, is statistically "
-            "robust."
-        ),
-        "usage": (
-            "- 'Top N pathways': how many pathways to show in the bar chart (in "
-            "order of significance/|NES|).\n"
-            "- 'Significance asterisks': show/hide the * ** *** symbols next to "
-            "each bar.\n"
-            "- 'Custom title' + 'Apply': replaces the automatic title.\n"
-            "- 'Export pathway table CSV...': saves the full list of pathways "
-            "shown (name, NES, padj, gene set size) to a CSV file.\n"
-            "- The table at the bottom shows the same data as the chart; click "
-            "the headers to sort (e.g. by ascending padj).\n"
-            "- In the chart, red bars are pathways with positive NES (enriched "
-            "among genes higher in the first group, A), blue bars have negative NES "
-            "(higher in the second group, B). The legend names the two groups.\n\n"
-            "Manual annotations and high-resolution export: identical to those "
-            "described for the PCA tab — use the 'Manual annotations' bar to "
-            "highlight a pathway of particular interest with an arrow or box "
-            "before exporting the figure with 'Export image'."
-        ),
-    },
-    "ora": {
-        "title": "Help — ORA / Over-representation",
-        "meaning": (
-            "ORA (Over-Representation Analysis) asks a simpler question than GSEA: "
-            "'among the genes I declared differentially expressed, are there more "
-            "genes of a given pathway than I would expect by chance?'.\n\n"
-            "How it works, briefly: the significant genes (padj and log2FC below/above "
-            "the cutoffs set in the Setup tab) are taken as a list; for each gene set "
-            "a hypergeometric test compares how many of them fall in that pathway "
-            "with how many would be expected given the size of the pathway. The "
-            "background (universe) is the set of genes actually tested in the DEA, "
-            "not the whole genome.\n\n"
-            "- k/K: genes of the list that belong to the pathway (k) over the genes "
-            "of the pathway present in the universe (K).\n"
-            "- FE (fold enrichment): (k / list size) divided by (K / universe size). "
-            "FE = 3 means the pathway is 3 times more represented than expected.\n"
-            "- padj: hypergeometric p-value corrected for the number of pathways "
-            "tested (Benjamini-Hochberg).\n"
-            "- Direction: ORA itself has no direction (the list is unordered). It is "
-            "derived afterwards from the genes supporting each pathway: UP / DOWN if "
-            "at least 80% of them have log2FC > 0 (higher in the first group of the "
-            "contrast) / < 0 (higher in the reference group), MIXED otherwise. N_UP and "
-            "N_DOWN give the exact counts.\n\n"
-            "ORA and GSEA are complementary, not alternatives: ORA depends on the "
-            "cutoffs used to build the gene list and ignores the magnitude of the "
-            "changes, while GSEA uses the whole ranking of genes."
-        ),
-        "usage": (
-            "- 'Top N pathways': how many pathways to show (significant ones first; "
-            "if none passes the padj cutoff, the top N by p-value are shown as "
-            "exploratory).\n"
-            "- 'Chart type': 'Bar' shows significance as bar length (-log10 padj), "
-            "with k/K, FE and padj written next to each bar; 'Dot' shows the Gene "
-            "Ratio on the X axis, dot size = number of genes, color = padj.\n"
-            "- 'Custom title' + 'Apply': replaces the automatic title.\n"
-            "- 'Export ORA table CSV...': saves the complete ORA table "
-            "(all pathways tested, including the gene lists).\n"
-            "- Which genes enter the ORA (all DEGs / only up / only down) is chosen "
-            "in the Setup tab and requires re-running the analysis; the padj cutoff "
-            "of this chart follows the Setup tab and updates without rerunning R.\n"
-            "- If the tab says ORA is not available, the reason is shown (typically "
-            "fewer than 5 genes passing the cutoffs, or ORA disabled in Setup).\n\n"
-            "Manual annotations and high-resolution export: identical to those "
-            "described for the PCA tab."
-        ),
-    },
-    "genes": {
-        "title": "Help — Gene counts",
-        "meaning": (
-            "This tab shows how much a single gene is expressed in EACH sample and relates it to the "
-            "metadata of the samples (age, sex, tumor stage, batch...). Every point is a sample.\n\n"
-            "The X axis is the normalized expression of the gene: log2(counts normalized for sequencing "
-            "depth + 1) for RNA-seq, or the already normalized log2 values for microarray (the exact "
-            "scale is written on the axis). These values are for exploration only: the differential "
-            "expression results come from the statistical model fitted on the raw counts.\n\n"
-            "- Numeric metadata (e.g. age): dot plot with Spearman's rank correlation (rho and p-value).\n"
-            "- Text metadata (e.g. sex, stage): one box per group with the samples as points; "
-            "Mann-Whitney U test for 2 groups, Kruskal-Wallis for 3 or more."
-        ),
-        "usage": (
-            "- 'Gene': type a gene symbol (case does not matter) and press 'Plot' or Enter. If the gene is "
-            "missing, similar names are suggested; genes removed by the low-counts filter are not available.\n"
-            "- 'Metadata (Y axis)' and 'Type': the metadata column to compare; 'Auto' recognizes numeric vs "
-            "text columns, or force the type.\n"
-            "- 'Color points by': paints the points with ANOTHER metadata column (e.g. plot expression vs age "
-            "and color by sex or by condition). Numeric columns get a color scale with a color bar, text "
-            "columns one color per group; missing values ('not available', empty...) are grey.\n"
-            "- 'Scale' and 'Color-blind-friendly palette': choose the numeric color scale / the Okabe-Ito "
-            "palette for groups.\n"
-            "- 'Show sample labels', 'Linear trend line', 'Custom title': cosmetic options.\n"
-            "- 'Export plot data CSV...': saves the values behind the chart.\n"
-            "- p-values need the Python package 'scipy' (pip install scipy); without it the charts are drawn "
-            "but the test results are not shown.\n\n"
-            "Manual annotations and high-resolution export: identical to those described for the PCA tab."
-        ),
-    },
-    "log": {
-        "title": "Help — Log",
-        "meaning": (
-            "This tab shows the text log of everything the R pipeline "
-            "(DESeq2/limma + GSEA) printed during execution: informational "
-            "messages, warnings, and any errors. It is the same kind of output you "
-            "would see running the R script from the command line, useful for "
-            "understanding exactly what was done (e.g. how many genes were "
-            "filtered out for low counts, which experimental design was used, how "
-            "many gene sets were tested in the GSEA) or for diagnosing an error."
-        ),
-        "usage": (
-            "- The log fills in automatically during 'Group extraction' and "
-            "'Run analysis'.\n"
-            "- 'Clear log': empties the text area (does not delete anything on "
-            "disk).\n"
-            "- 'Save log to file...': exports the current content to a .txt file, "
-            "useful for attaching to a bug report or for your own internal project "
-            "documentation."
-        ),
-    },
-}
-
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(1)
-except Exception:
-    pass
-
-def apply_theme(root: tk.Tk) -> ttk.Style:
-    style = ttk.Style(root)
+def _fmt_sci(value) -> str:
+    if value is None or pd.isna(value):
+        return ""
     try:
-        style.theme_use("clam")
-    except tk.TclError:
-        pass
+        return f"{float(value):.2e}"
+    except (TypeError, ValueError):
+        return str(value)
 
-    root.configure(bg=PALETTE["bg"])
+def _round_or_blank(v, n=3):
+    try:
+        return "" if pd.isna(v) else round(float(v), n)
+    except (TypeError, ValueError):
+        return ""
 
-    style.configure(".", background=PALETTE["bg"], foreground=PALETTE["text"], font=FONT_BASE)
-    style.configure("TFrame", background=PALETTE["bg"])
-    style.configure("TLabel", background=PALETTE["bg"], foreground=PALETTE["text"], font=FONT_BASE)
-    style.configure("Header.TLabel", background=PALETTE["accent"], foreground="white", font=FONT_HEADER)
-    style.configure("Subheader.TLabel", background=PALETTE["accent"], foreground=PALETTE["accent_pale"],
-                     font=FONT_SUBHEADER)
-    style.configure("Muted.TLabel", background=PALETTE["bg"], foreground=PALETTE["muted"], font=FONT_SMALL)
-    style.configure("CardMuted.TLabel", background=PALETTE["bg_card"], foreground=PALETTE["muted"],
-                     font=FONT_SMALL)
-    style.configure("Ok.TLabel", background=PALETTE["bg_card"], foreground=PALETTE["ok"], font=FONT_BOLD)
-    style.configure("Warn.TLabel", background=PALETTE["bg_card"], foreground=PALETTE["warn"], font=FONT_BOLD)
-    style.configure("Err.TLabel", background=PALETTE["bg_card"], foreground=PALETTE["err"], font=FONT_BOLD)
+class Worker(QThread):
+    log = Signal(str)
+    done = Signal(object)
+    failed = Signal(str, object)
 
-    style.configure("TLabelframe", background=PALETTE["bg_card"], bordercolor=PALETTE["border_strong"],
-                     relief="solid", borderwidth=1)
-    style.configure("TLabelframe.Label", background=PALETTE["bg_card"], foreground=PALETTE["accent"],
-                     font=("Trebuchet MS", 11, "bold"))
-
-    style.configure("TButton", background=PALETTE["accent_pale_2"], foreground=PALETTE["accent"],
-                     padding=(12, 7), font=FONT_BASE, borderwidth=0, relief="flat")
-    style.map("TButton",
-              background=[("active", PALETTE["accent_pale"]), ("disabled", "#eceff2")],
-              foreground=[("disabled", "#9aa4ad")])
-
-    style.configure("Accent.TButton", background=PALETTE["accent"], foreground="white",
-                     padding=(16, 9), font=FONT_BOLD, borderwidth=0, relief="flat")
-    style.map("Accent.TButton",
-              background=[("active", PALETTE["accent_light"]), ("disabled", "#a9bccb")])
-
-    style.configure("Danger.TButton", background="#f8ebe9", foreground=PALETTE["err"],
-                     padding=6, font=FONT_BASE, borderwidth=0)
-    style.map("Danger.TButton", background=[("active", "#f1d7d3")])
-
-    style.configure("Help.TButton", background=PALETTE["accent_pale"], foreground=PALETTE["accent"],
-                     padding=6, font=FONT_BOLD, borderwidth=0)
-    style.map("Help.TButton", background=[("active", PALETTE["accent_light"])],
-              foreground=[("active", "white")])
-
-    style.configure("Toolbutton", background=PALETTE["bg_card"], foreground=PALETTE["text"],
-                     padding=5, font=FONT_SMALL, borderwidth=1, relief="solid",
-                     bordercolor=PALETTE["border"])
-    style.map("Toolbutton",
-              background=[("selected", PALETTE["accent"]), ("active", PALETTE["accent_pale"])],
-              foreground=[("selected", "white")])
-
-    style.configure("TNotebook", background=PALETTE["bg"], borderwidth=0, tabmargins=(8, 8, 8, 0))
-    style.configure("TNotebook.Tab", background=PALETTE["accent_pale_2"], foreground=PALETTE["accent"],
-                     padding=(16, 9), font=FONT_BASE, borderwidth=0)
-    style.map("TNotebook.Tab",
-              background=[("selected", PALETTE["accent"]), ("active", PALETTE["accent_pale"])],
-              foreground=[("selected", "white")])
-
-    style.configure("Treeview", background="white", fieldbackground="white", foreground=PALETTE["text"],
-                     rowheight=25, font=FONT_BASE, borderwidth=0)
-    style.configure("Treeview.Heading", background=PALETTE["accent"], foreground="white", font=FONT_BOLD,
-                     relief="flat", padding=(6, 6))
-    style.map("Treeview.Heading", background=[("active", PALETTE["accent_light"])])
-    style.map("Treeview", background=[("selected", PALETTE["accent_pale"])],
-              foreground=[("selected", PALETTE["text"])])
-
-    style.configure("Horizontal.TProgressbar", background=PALETTE["accent"],
-                     troughcolor=PALETTE["accent_pale_2"], borderwidth=0)
-
-    style.configure("TCheckbutton", background=PALETTE["bg_card"], font=FONT_BASE)
-    style.configure("TRadiobutton", background=PALETTE["bg_card"], font=("Trebuchet MS", 11, "bold"), foreground="#008026")
-    style.configure("TEntry", padding=4, fieldbackground="white")
-    style.configure("Invalid.TEntry", padding=4, fieldbackground="#fdecea")
-    style.configure("TSpinbox", padding=4)
-    style.configure("TCombobox", padding=4)
-
-    style.configure("TPanedwindow", background=PALETTE["bg"])
-    style.configure("TScrollbar", background=PALETTE["accent_pale_2"], troughcolor=PALETTE["bg"],
-                     bordercolor=PALETTE["border"])
-
-    return style
-
-
-class Tooltip:
-
-    def __init__(self, widget, text: str, delay: int = 500, wraplength: int = 280):
-        self.widget = widget
-        self.text = text
-        self.delay = delay
-        self.wraplength = wraplength
-        self._after_id = None
-        self._tip = None
-        widget.bind("<Enter>", self._schedule, add="+")
-        widget.bind("<Leave>", self._hide, add="+")
-        widget.bind("<ButtonPress>", self._hide, add="+")
-
-    def _schedule(self, _event=None):
-        self._unschedule()
-        self._after_id = self.widget.after(self.delay, self._show)
-
-    def _unschedule(self):
-        if self._after_id:
-            self.widget.after_cancel(self._after_id)
-            self._after_id = None
-
-    def _show(self):
-        if self._tip or not self.text:
-            return
-        x = self.widget.winfo_rootx() + 12
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
-        self._tip = tk.Toplevel(self.widget)
-        self._tip.wm_overrideredirect(True)
-        try:
-            self._tip.wm_attributes("-topmost", True)
-        except tk.TclError:
-            pass
-        self._tip.wm_geometry(f"+{x}+{y}")
-        tk.Label(self._tip, text=self.text, justify="left", background="#fffee0",
-                 relief="solid", borderwidth=1, wraplength=self.wraplength,
-                 font=FONT_SMALL, padx=6, pady=4).pack()
-
-    def _hide(self, _event=None):
-        self._unschedule()
-        if self._tip:
-            self._tip.destroy()
-            self._tip = None
-
-
-def add_tip(widget, text: str):
-    Tooltip(widget, text)
-    return widget
-
-class DropZone(tk.Frame):
-
-    def __init__(self, parent, title: str, subtitle: str, path_var: tk.StringVar,
-                 pick_command, icon: str = "📄", accepted_ext=None):
-        super().__init__(parent, bg=PALETTE["bg_card"], highlightthickness=2,
-                          highlightbackground=PALETTE["border_strong"], bd=0, cursor="hand2")
-        self.path_var = path_var
-        self.pick_command = pick_command
-        self.accepted_ext = accepted_ext or (".csv", ".tsv", ".txt", ".xlsx", ".xls", ".json")
-        self._bg_idle = PALETTE["bg_card"]
-        self._bg_hover = PALETTE["accent_pale_2"]
-        self._bg_drop = PALETTE["drop_active"]
-
-        self.icon_lbl = tk.Label(self, text=icon, font=("Segoe UI Emoji", 28),
-                                  bg=self._bg_idle, fg=PALETTE["accent"])
-        self.icon_lbl.pack(pady=(16, 4))
-
-        self.title_lbl = tk.Label(self, text=title, font=FONT_BOLD, bg=self._bg_idle,
-                                   fg=PALETTE["accent"])
-        self.title_lbl.pack()
-
-        self.subtitle_lbl = tk.Label(self, text=subtitle, font=FONT_SMALL, bg=self._bg_idle,
-                                      fg=PALETTE["muted"], wraplength=230, justify="center")
-        self.subtitle_lbl.pack(pady=(2, 10))
-
-        self.file_lbl = tk.Label(self, text="No file selected — drag it here or click",
-                                  font=FONT_SMALL, bg=self._bg_idle, fg=PALETTE["muted"],
-                                  wraplength=230, justify="center")
-        self.file_lbl.pack(pady=(0, 8), padx=10)
-
-        self.browse_btn = ttk.Button(self, text="Sfoglia...", command=self._trigger_pick)
-        self.browse_btn.pack(pady=(0, 16))
-
-        self._bg_widgets = [self, self.icon_lbl, self.title_lbl, self.subtitle_lbl, self.file_lbl]
-        for w in (self, self.icon_lbl, self.title_lbl, self.subtitle_lbl, self.file_lbl):
-            w.bind("<Button-1>", lambda _e: self._trigger_pick())
-            w.bind("<Enter>", self._on_enter)
-            w.bind("<Leave>", self._on_leave)
-
-        self._register_dnd()
-        self.path_var.trace_add("write", lambda *a: self._refresh())
-        self._refresh()
-
-    def _register_dnd(self):
-        if not HAS_DND:
-            add_tip(self, "Drag & drop is not available (install 'tkinterdnd2' to "
-                          "enable it). You can still click the card to select the file.")
-            return
-        try:
-            self.drop_target_register(DND_FILES)
-            self.dnd_bind("<<Drop>>", self._on_drop)
-            self.dnd_bind("<<DragEnter>>", lambda e: self._set_bg(self._bg_drop))
-            self.dnd_bind("<<DragLeave>>", lambda e: self._on_leave())
-        except Exception:
-            pass
-
-    def _trigger_pick(self):
-        self.pick_command()
-
-    def _on_enter(self, _event=None):
-        self._set_bg(self._bg_hover)
-
-    def _on_leave(self, _event=None):
-        self._set_bg(self._bg_idle)
-
-    def _set_bg(self, color):
-        self.configure(bg=color)
-        for w in self._bg_widgets[1:]:
-            w.configure(bg=color)
-
-    def _on_drop(self, event):
-        try:
-            paths = self.tk.splitlist(event.data)
-        except Exception:
-            paths = [event.data]
-        if paths:
-            path = paths[0].strip("{}")
-            self.path_var.set(path)
-        self._on_leave()
-
-    def _refresh(self):
-        path = self.path_var.get().strip()
-        if not path:
-            self.file_lbl.configure(text="No file selected — drag it here or click",
-                                     fg=PALETTE["muted"])
-            self.icon_lbl.configure(fg=PALETTE["accent"])
-            self.configure(highlightbackground=PALETTE["border_strong"])
-        elif os.path.isfile(path):
-            self.file_lbl.configure(text=f"✓  {os.path.basename(path)}", fg=PALETTE["ok"])
-            self.icon_lbl.configure(fg=PALETTE["ok"])
-            self.configure(highlightbackground=PALETTE["ok"])
-        else:
-            self.file_lbl.configure(text=f"✗  File not found: {os.path.basename(path)}",
-                                     fg=PALETTE["err"])
-            self.icon_lbl.configure(fg=PALETTE["err"])
-            self.configure(highlightbackground=PALETTE["err"])
-
-class ScrollableFrame(ttk.Frame):
-    def __init__(self, parent):
+    def __init__(self, fn, title: str, parent=None):
         super().__init__(parent)
-        self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0, bg=PALETTE["bg"])
-        self.vbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.inner = ttk.Frame(self.canvas)
+        self._fn, self._title = fn, title
 
-        self.canvas.configure(yscrollcommand=self.vbar.set)
-        self.vbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-
-        self.inner.bind("<Configure>", self._on_inner_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-        self.canvas.bind("<Enter>", self._bind_wheel)
-        self.canvas.bind("<Leave>", self._unbind_wheel)
-
-    def _on_inner_configure(self, _event):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def _on_canvas_configure(self, event):
-        self.canvas.itemconfig(self._window_id, width=event.width)
-
-    def _bind_wheel(self, _event):
-        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
-        self.canvas.bind_all("<Button-4>", self._on_wheel)
-        self.canvas.bind_all("<Button-5>", self._on_wheel)
-
-    def _unbind_wheel(self, _event):
-        self.canvas.unbind_all("<MouseWheel>")
-        self.canvas.unbind_all("<Button-4>")
-        self.canvas.unbind_all("<Button-5>")
-
-    def _on_wheel(self, event):
-        if event.num == 5 or event.delta < 0:
-            self.canvas.yview_scroll(1, "units")
-        elif event.num == 4 or event.delta > 0:
-            self.canvas.yview_scroll(-1, "units")
-
-
-def confidence_ellipse(x, y, ax, n_std=1.5, **kwargs):
-    if len(x) < 3:
-        return None
-    cov = np.cov(x, y)
-    if cov[0, 0] <= 0 or cov[1, 1] <= 0:
-        return None
-    pearson = cov[0, 1] / np.sqrt(cov[0, 0] * cov[1, 1])
-    pearson = max(min(pearson, 0.999), -0.999)
-    radius_x = np.sqrt(1 + pearson)
-    radius_y = np.sqrt(1 - pearson)
-    ellipse = mpatches.Ellipse((0, 0), width=radius_x * 2, height=radius_y * 2, **kwargs)
-
-    scale_x = np.sqrt(cov[0, 0]) * n_std
-    scale_y = np.sqrt(cov[1, 1]) * n_std
-    mean_x, mean_y = np.mean(x), np.mean(y)
-
-    transf = (transforms.Affine2D()
-              .rotate_deg(45)
-              .scale(scale_x, scale_y)
-              .translate(mean_x, mean_y))
-    ellipse.set_transform(transf + ax.transData)
-    return ax.add_patch(ellipse)
-
-class InteractivePlotPanel(ttk.Frame):
-
-    def __init__(self, parent, explanation: str, figsize=(6.4, 5.0), redraw_callback=None):
-        super().__init__(parent)
-        self.redraw_callback = redraw_callback or (lambda: None)
-
-        self.figure = Figure(figsize=figsize, dpi=100)
-        self.figure.patch.set_facecolor("white")
-        self.ax = self.figure.add_subplot(111)
-
-        self.canvas = FigureCanvasTkAgg(self.figure, master=self)
-        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        toolbar_frame = ttk.Frame(self)
-        toolbar_frame.pack(side=tk.TOP, fill=tk.X)
-        self.toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame, pack_toolbar=False)
-        self.toolbar.update()
-        bg_color = PALETTE["accent_pale_2"]  
-        button_bg = "#cae2f9"               
-        toolbar_frame.config(style="TFrame") 
-        self.toolbar.config(background=bg_color)
-        if hasattr(self.toolbar, '_message_label'):
-            self.toolbar._message_label.config(
-                background=bg_color, 
-                foreground=PALETTE["text"], 
-                font=FONT_SMALL
-            )
-
-        for child in self.toolbar.winfo_children():
-            if isinstance(child, tk.Button):
-                child.config(
-                    background=button_bg,
-                    activebackground="#e4e6eb", 
-                    relief="flat",      
-                    borderwidth=1,
-                    highlightthickness=0,   
-                    padx=6,
-                    pady=4
-                )
-                child.bind("<Enter>", lambda e, btn=child: btn.config(background="#e4e6eb"))
-                child.bind("<Leave>", lambda e, btn=child: btn.config(background=button_bg))
-                
-            elif isinstance(child, (tk.Frame, tk.Label)):
-                child.config(background=bg_color)
-
-        self.toolbar.pack(side=tk.TOP, fill=tk.X)
-
-        self.grid_on = tk.BooleanVar(value=True)
-        self.minimal_spines = tk.BooleanVar(value=True)
-        self.legend_on = tk.BooleanVar(value=True)
-        self.legend_pos = tk.StringVar(value="best")
-        self.font_style = tk.StringVar(value="sans")
-        self.panel_label = tk.StringVar(value="")
-        self.panel_label_size = tk.IntVar(value=14)
-
-        self._build_style_toolbar()
-
-        self.annotation_mode = tk.StringVar(value="none")  
-        self.annotation_color = "#2c3e50"
-        self.annotation_lw = tk.DoubleVar(value=1.5)
-        self.custom_artists: list = []
-        self._drag_start = None
-
-        self._build_annotation_toolbar()
-
-        box = tk.Text(self, height=4, wrap="word", bg=PALETTE["accent_pale_2"], relief=tk.FLAT,
-                      font=FONT_SMALL, fg=PALETTE["text"], padx=8, pady=6)
-        box.insert("1.0", explanation)
-        box.configure(state="disabled")
-        box.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=(2, 6))
-        self.explanation_box = box
-
-        self.canvas.mpl_connect("button_press_event", self._on_press)
-        self.canvas.mpl_connect("button_release_event", self._on_release)
-
-    def _build_style_toolbar(self):
-        bar = ttk.Frame(self)
-        bar.pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
-
-        ttk.Label(bar, text="Figure style (for publication):", font=FONT_SMALL).pack(
-            side=tk.LEFT, padx=(8, 6))
-
-        cb_grid = ttk.Checkbutton(bar, text="Grid", variable=self.grid_on,
-                                   command=self.redraw_callback)
-        cb_grid.pack(side=tk.LEFT, padx=3)
-        add_tip(cb_grid, "Shows/hides the grid lines behind the chart.")
-
-        cb_spines = ttk.Checkbutton(bar, text="Minimalist axes", variable=self.minimal_spines,
-                                     command=self.redraw_callback)
-        cb_spines.pack(side=tk.LEFT, padx=3)
-        add_tip(cb_spines, "Hides the top and right borders of the chart, as required by "
-                            "the typical style of scientific journals.")
-
-        cb_legend = ttk.Checkbutton(bar, text="Legend", variable=self.legend_on,
-                                     command=self.redraw_callback)
-        cb_legend.pack(side=tk.LEFT, padx=(10, 3))
-        add_tip(cb_legend, "Shows/hides the chart legend.")
-
-        pos_combo = ttk.Combobox(bar, textvariable=self.legend_pos, state="readonly", width=12,
-                                  values=LEGEND_POSITIONS)
-        pos_combo.pack(side=tk.LEFT, padx=3)
-        pos_combo.bind("<<ComboboxSelected>>", lambda e: self.redraw_callback())
-        add_tip(pos_combo, "Legend position. 'outside' places it outside the chart area, "
-                            "useful when it overlaps data points.")
-
-        ttk.Label(bar, text="Font:", font=FONT_SMALL).pack(side=tk.LEFT, padx=(10, 2))
-        font_combo = ttk.Combobox(bar, textvariable=self.font_style, state="readonly", width=8,
-                                   values=["sans", "serif"])
-        font_combo.pack(side=tk.LEFT, padx=2)
-        font_combo.bind("<<ComboboxSelected>>", lambda e: self.redraw_callback())
-        add_tip(font_combo, "Many journals require a serif font (e.g. Times) for figures; "
-                             "'sans' is the most common style for presentations and posters.")
-
-        ttk.Label(bar, text="Panel label:", font=FONT_SMALL).pack(side=tk.LEFT, padx=(10, 2))
-        label_entry = ttk.Entry(bar, textvariable=self.panel_label, width=4)
-        label_entry.pack(side=tk.LEFT, padx=2)
-        label_entry.bind("<KeyRelease>", lambda e: self.redraw_callback())
-        add_tip(label_entry, "E.g. 'A', 'B', 'C': adds a bold letter in the top-left corner, "
-                              "useful for multi-panel figures in a paper.")
-
-        ttk.Spinbox(bar, from_=8, to=28, textvariable=self.panel_label_size, width=4,
-                    command=self.redraw_callback).pack(side=tk.LEFT, padx=2)
-
-    def apply_common_style(self):
-        ax = self.ax
-        ax.grid(self.grid_on.get(), alpha=0.25)
-        show_side_spines = not self.minimal_spines.get()
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(show_side_spines)
-
-        family = "serif" if self.font_style.get() == "serif" else "sans-serif"
-        text_objs = [ax.title, ax.xaxis.label, ax.yaxis.label]
-        text_objs += list(ax.get_xticklabels()) + list(ax.get_yticklabels())
-        legend = ax.get_legend()
-        if legend:
-            text_objs += list(legend.get_texts())
-            if legend.get_title():
-                text_objs.append(legend.get_title())
-        for obj in text_objs:
-            try:
-                obj.set_family(family)
-            except Exception:
-                pass
-
-        label = self.panel_label.get().strip()
-        if label:
-            ax.text(-0.12, 1.06, label, transform=ax.transAxes,
-                     fontsize=self.panel_label_size.get(), fontweight="bold",
-                     va="bottom", ha="left")
-
-    def place_legend(self, **kwargs):
-        if not self.legend_on.get():
-            leg = self.ax.get_legend()
-            if leg:
-                leg.remove()
-            return
-        pos = self.legend_pos.get()
-        if pos == "outside":
-            self.ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0,
-                            frameon=False, **kwargs)
-        else:
-            self.ax.legend(loc=pos, frameon=False, **kwargs)
-
-    def _build_annotation_toolbar(self):
-        bar = ttk.Frame(self)
-        bar.pack(side=tk.TOP, fill=tk.X, pady=(2, 0))
-
-        ttk.Label(bar, text="Manual annotations:", font=FONT_SMALL).pack(side=tk.LEFT, padx=(8, 4))
-        modes = [("None", "none"), ("Arrow", "arrow"), ("Line", "line"),
-                 ("Box", "rect"), ("Text", "text")]
-        for label, val in modes:
-            rb = ttk.Radiobutton(bar, text=label, value=val, variable=self.annotation_mode,
-                                  style="Toolbutton")
-            rb.pack(side=tk.LEFT, padx=1)
-        add_tip(bar, "Choose a tool and then drag (or click, for text) directly on the "
-                     "chart to add the chosen annotation.")
-
-        ttk.Label(bar, text="Color:", font=FONT_SMALL).pack(side=tk.LEFT, padx=(10, 2))
-        self.color_swatch = tk.Button(bar, width=2, bg=self.annotation_color, relief="solid",
-                                       bd=1, command=self._pick_color, cursor="hand2")
-        self.color_swatch.pack(side=tk.LEFT, padx=2)
-
-        ttk.Label(bar, text="Width:", font=FONT_SMALL).pack(side=tk.LEFT, padx=(10, 2))
-        ttk.Spinbox(bar, from_=0.5, to=6.0, increment=0.5, textvariable=self.annotation_lw,
-                    width=4).pack(side=tk.LEFT)
-
-        btn_undo = ttk.Button(bar, text="Undo last", command=self._undo_annotation)
-        btn_undo.pack(side=tk.LEFT, padx=(10, 2))
-        add_tip(btn_undo, "Removes the last manual annotation added.")
-        btn_clear = ttk.Button(bar, text="Clear all", command=self._clear_annotations)
-        btn_clear.pack(side=tk.LEFT, padx=2)
-        add_tip(btn_clear, "Removes all manual annotations from the current chart.")
-
-        btn_export = ttk.Button(bar, text="Export image",
-                                 style="Accent.TButton", command=self._open_export_dialog)
-        btn_export.pack(side=tk.RIGHT, padx=8)
-        add_tip(btn_export, "Saves this chart in high resolution, with journal format "
-                             "presets, ready to use directly in a paper or poster.")
-
-    def clear(self):
-        self.ax.clear()
-        self.custom_artists = []
-        self.canvas.draw_idle()
-
-    def redraw(self):
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
-
-    def enable_hover(self, artist, formatter):
-        """Adds a hover tooltip on points, if mplcursors is available.
-        formatter(index) -> string to display."""
-        if not HAS_MPLCURSORS:
-            return
-        cursor = mplcursors.cursor(artist, hover=True)
-
-        @cursor.connect("add")
-        def _(sel):
-            sel.annotation.set_text(formatter(sel.index))
-            sel.annotation.get_bbox_patch().set(fc="lightyellow", alpha=0.95)
-
-    def _pick_color(self):
-        color = colorchooser.askcolor(color=self.annotation_color,
-                                       title="Annotation color")[1]
-        if color:
-            self.annotation_color = color
-            self.color_swatch.configure(bg=color)
-
-    def _on_press(self, event):
-        if event.inaxes != self.ax or self.annotation_mode.get() == "none":
-            return
-        if getattr(self.toolbar, "mode", ""):
-            return
-        if self.annotation_mode.get() == "text":
-            self._add_text_annotation(event.xdata, event.ydata)
-            return
-        self._drag_start = (event.xdata, event.ydata)
-
-    def _on_release(self, event):
-        if self._drag_start is None:
-            return
-        x0, y0 = self._drag_start
-        self._drag_start = None
-        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
-            return
-        x1, y1 = event.xdata, event.ydata
-        if x0 == x1 and y0 == y1:
-            return
-
-        mode = self.annotation_mode.get()
-        color = self.annotation_color
-        lw = self.annotation_lw.get()
-        artist = None
-
-        if mode == "arrow":
-            artist = self.ax.annotate(
-                "", xy=(x1, y1), xytext=(x0, y0),
-                arrowprops=dict(arrowstyle="-|>", color=color, lw=lw, mutation_scale=14),
-            )
-        elif mode == "line":
-            (artist,) = self.ax.plot([x0, x1], [y0, y1], color=color, lw=lw,
-                                      solid_capstyle="round")
-        elif mode == "rect":
-            x_min, y_min = min(x0, x1), min(y0, y1)
-            w, h = abs(x1 - x0), abs(y1 - y0)
-            artist = mpatches.Rectangle((x_min, y_min), w, h, fill=False,
-                                         edgecolor=color, linewidth=lw)
-            self.ax.add_patch(artist)
-
-        if artist is not None:
-            self.custom_artists.append(artist)
-            self.redraw()
-
-    def _add_text_annotation(self, x, y):
-        text = simpledialog.askstring("Add text", "Annotation text:", parent=self)
-        if text:
-            artist = self.ax.text(
-                x, y, text, fontsize=10, color=self.annotation_color, ha="center", va="center",
-                bbox=dict(boxstyle="round,pad=0.25", fc="white", ec=self.annotation_color, alpha=0.9),
-            )
-            self.custom_artists.append(artist)
-            self.redraw()
-
-    def _undo_annotation(self):
-        if not self.custom_artists:
-            return
-        artist = self.custom_artists.pop()
+    def run(self):
         try:
-            artist.remove()
-        except Exception:
-            pass
-        self.redraw()
+            self.done.emit(self._fn(self.log.emit))
+        except Exception as exc:  
+            self.failed.emit(self._title, exc)
 
-    def _clear_annotations(self):
-        for artist in self.custom_artists:
-            try:
-                artist.remove()
-            except Exception:
-                pass
-        self.custom_artists = []
-        self.redraw()
+class ResultPage(QWidget):
 
-    def _open_export_dialog(self):
-        dlg = tk.Toplevel(self)
-        dlg.title("Export image")
-        dlg.configure(bg=PALETTE["bg_card"])
-        dlg.resizable(False, False)
-        dlg.transient(self.winfo_toplevel())
-        dlg.grab_set()
+    def __init__(self, content: QWidget, empty_text: str):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.stack = QStackedWidget()
+        empty = QWidget()
+        el = QVBoxLayout(empty)
+        el.addStretch()
+        big = QLabel("◔")
+        big.setAlignment(Qt.AlignCenter)
+        big.setStyleSheet(f"font-size: 46pt; color: {PALETTE['border_strong']};")
+        msg = QLabel(empty_text)
+        msg.setAlignment(Qt.AlignCenter)
+        msg.setObjectName("muted")
+        msg.setWordWrap(True)
+        el.addWidget(big)
+        el.addWidget(msg)
+        el.addStretch()
+        self.stack.addWidget(empty)
+        self.stack.addWidget(content)
+        lay.addWidget(self.stack)
 
-        frm = ttk.Frame(dlg, padding=16)
-        frm.pack(fill=tk.BOTH, expand=True)
+    def set_ready(self, ready: bool):
+        self.stack.setCurrentIndex(1 if ready else 0)
 
-        cur_w, cur_h = self.figure.get_size_inches()
-        aspect = float(cur_w) / float(cur_h) if cur_h else 1.0
+def _scroll(widget: QWidget, width: int | None = None) -> QScrollArea:
+    sa = QScrollArea()
+    sa.setWidgetResizable(True)
+    sa.setFrameShape(QFrame.NoFrame)
+    sa.setWidget(widget)
+    sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    if width:
+        sa.setFixedWidth(width)
+    return sa
 
-        ttk.Label(frm, text="Size preset (scientific journals):").grid(
-            row=0, column=0, sticky="w", pady=5)
-        preset_var = tk.StringVar(value="Custom")
-        preset_combo = ttk.Combobox(frm, textvariable=preset_var, state="readonly", width=26,
-                                     values=list(EXPORT_PRESETS.keys()))
-        preset_combo.grid(row=0, column=1, sticky="w", pady=5)
-        add_tip(preset_combo, "Sets standard width/height for single, 1.5 or double column, "
-                               "typical of scientific journals.")
-
-        ttk.Label(frm, text="File format:").grid(row=1, column=0, sticky="w", pady=5)
-        fmt_var = tk.StringVar(value="PNG")
-        ttk.Combobox(frm, textvariable=fmt_var, state="readonly", width=10,
-                     values=["PNG", "PDF", "SVG", "TIFF", "EPS"]).grid(row=1, column=1, sticky="w", pady=5)
-        ttk.Label(frm, text="PDF/SVG/EPS are vector formats: perfect quality at\nany size, "
-                            "ideal for figures with text/lines.", style="Muted.TLabel",
-                  justify="left").grid(row=1, column=2, rowspan=1, sticky="w", padx=(10, 0))
-
-        ttk.Label(frm, text="Resolution (DPI):").grid(row=2, column=0, sticky="w", pady=5)
-        dpi_var = tk.IntVar(value=300)
-        ttk.Combobox(frm, textvariable=dpi_var, width=10,
-                     values=[150, 300, 600, 1200]).grid(row=2, column=1, sticky="w", pady=5)
-
-        ttk.Label(frm, text="Width (inches):").grid(row=3, column=0, sticky="w", pady=5)
-        width_var = tk.DoubleVar(value=round(float(cur_w), 2))
-        ttk.Spinbox(frm, from_=2.0, to=20.0, increment=0.5, textvariable=width_var,
-                    width=10).grid(row=3, column=1, sticky="w", pady=5)
-
-        ttk.Label(frm, text="Height (inches):").grid(row=4, column=0, sticky="w", pady=5)
-        height_var = tk.DoubleVar(value=round(float(cur_h), 2))
-        height_spin = ttk.Spinbox(frm, from_=2.0, to=20.0, increment=0.5, textvariable=height_var, width=10)
-        height_spin.grid(row=4, column=1, sticky="w", pady=5)
-
-        lock_var = tk.BooleanVar(value=False)
-        lock_cb = ttk.Checkbutton(frm, text="Lock aspect ratio (width/height)", variable=lock_var)
-        lock_cb.grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 8))
-        add_tip(lock_cb, "If enabled, changing the width automatically adjusts the height "
-                          "to keep the current aspect ratio.")
-
-        def on_preset_change(_event=None):
-            preset = EXPORT_PRESETS.get(preset_var.get())
-            if preset:
-                width_var.set(round(preset[0], 2))
-                height_var.set(round(preset[1], 2))
-        preset_combo.bind("<<ComboboxSelected>>", on_preset_change)
-
-        def on_width_change(*_args):
-            if lock_var.get():
-                try:
-                    height_var.set(round(width_var.get() / aspect, 2))
-                except (ZeroDivisionError, tk.TclError):
-                    pass
-        width_var.trace_add("write", on_width_change)
-
-        transparent_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frm, text="Transparent background", variable=transparent_var).grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(0, 10))
-
-        ttk.Label(frm, text="Tip: most journals require at least\n"
-                            "300 DPI (often 600 for color TIFF/EPS).",
-                  style="Muted.TLabel", justify="left").grid(row=7, column=0, columnspan=2, sticky="w")
-
-        def do_export():
-            ext_map = {"PNG": ".png", "PDF": ".pdf", "SVG": ".svg", "TIFF": ".tiff", "EPS": ".eps"}
-            ext = ext_map[fmt_var.get()]
-            path = filedialog.asksaveasfilename(defaultextension=ext,
-                                                 filetypes=[(fmt_var.get(), f"*{ext}")])
-            if not path:
-                return
-            orig_size = self.figure.get_size_inches()
-            try:
-                self.figure.set_size_inches(float(width_var.get()), float(height_var.get()))
-                self.figure.savefig(path, dpi=int(dpi_var.get()),
-                                     transparent=transparent_var.get(),
-                                     bbox_inches="tight", pad_inches=0.15)
-            except Exception as e:
-                messagebox.showerror("Export error", str(e), parent=dlg)
-                return
-            finally:
-                self.figure.set_size_inches(*orig_size)
-                self.canvas.draw_idle()
-            dlg.destroy()
-            messagebox.showinfo("Export complete", f"Image saved to:\n{path}")
-
-        btns = ttk.Frame(frm)
-        btns.grid(row=8, column=0, columnspan=3, pady=(14, 0), sticky="e")
-        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btns, text="Save...", style="Accent.TButton", command=do_export).pack(side=tk.RIGHT, padx=4)
-
-
-class DEAApp(ttk.Frame):
-
-    LABEL_MODE_DISPLAY = [
-        "No labels",
-        "All significant genes",
-        "Top N by padj",
-        "Top N by |log2FC|",
-        "Specific genes (list)",
-    ]
-    LABEL_MODE_MAP = {
-        "No labels": "none",
-        "All significant genes": "all_sig",
-        "Top N by padj": "top_padj",
-        "Top N by |log2FC|": "top_lfc",
-        "Specific genes (list)": "custom",
-    }
-
-    REGULATION_FILTER_OPTIONS = ["All", "Upregulated only", "Downregulated only", "Not Significant only"]
-
+class DEAWindow(QMainWindow):
+    LABEL_MODE_DISPLAY = ["No labels", "All significant genes", "Top N by padj", "Top N by |log2FC|",
+                          "Specific genes (list)"]
+    LABEL_MODE_MAP = {"No labels": "none", "All significant genes": "all_sig", "Top N by padj": "top_padj",
+                      "Top N by |log2FC|": "top_lfc", "Specific genes (list)": "custom"}
     ORA_DIRECTION_DISPLAY = ["All DEGs (both directions)",
                              "Only genes higher in the 1st group (log2FC > 0)",
                              "Only genes higher in the 2nd/reference group (log2FC < 0)"]
-    ORA_DIRECTION_MAP = {
-        "All DEGs (both directions)": "all",
-        "Only genes higher in the 1st group (log2FC > 0)": "up",
-        "Only genes higher in the 2nd/reference group (log2FC < 0)": "down",
-    }
+    ORA_DIRECTION_MAP = {ORA_DIRECTION_DISPLAY[0]: "all", ORA_DIRECTION_DISPLAY[1]: "up",
+                         ORA_DIRECTION_DISPLAY[2]: "down"}
+    SETTINGS_FORMAT = "de-gui-settings"      
+    SETTINGS_VERSION = 1
 
-    def __init__(self, root):
-        super().__init__(root, style="TFrame")
-        self.root = root
-        self.pack(fill=tk.BOTH, expand=True)
+    PAGES = [
+        ("setup", "1", "Setup & Parameters", "WORKFLOW"),
+        ("pca", "2", "PCA", "RESULTS"),
+        ("volcano", "3", "Volcano plot", None),
+        ("table", "4", "Gene table", None),
+        ("gsea", "5", "GSEA / Pathways", None),
+        ("ora", "6", "ORA / Over-rep.", None),
+        ("genes", "7", "Gene counts", None),
+        ("log", "≡", "Log", "SYSTEM"),]
 
-        self.counts_path = tk.StringVar()
-        self.metadata_path = tk.StringVar()
-        self.gene_col = tk.StringVar(value="1")
-        self.sample_col = tk.StringVar(value="1")
-        self.condition_col = tk.StringVar(value="3")
-        self.gene_list_var = tk.StringVar(value="")   # comma-separated genes (empty = all genes)
-        self.method = tk.StringVar(value="RNAseq")
-        self.species_display = tk.StringVar(value=next(iter(engine.SPECIES_CHOICES)))   # Human by default
-        self.pairwise_all = tk.BooleanVar(value=False)
-        self.padj_cutoff = tk.DoubleVar(value=0.05)
-        self.lfc_cutoff = tk.DoubleVar(value=1.0)
-        self.gsea_category = tk.StringVar(value="H")
-        self.gsea_subcategory = tk.StringVar(value="")
-        self.min_counts_var = tk.IntVar(value=10)   # 10 = the filter that was previously hard-coded in the R pipeline
-        self.top_n_pathways = tk.IntVar(value=15)
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("DEA Explorer")
+        self.resize(1360, 900)
+        self.setMinimumSize(1100, 720)
 
-        self.pca_show_labels = tk.BooleanVar(value=False)
-        self.pca_show_ellipses = tk.BooleanVar(value=False)
-        self.pca_colorblind = tk.BooleanVar(value=False)
-        self.pca_title_var = tk.StringVar(value="")
-        self.pca_color_col = tk.StringVar(value=pcol.DEFAULT_COLUMN)
-        self.pca_color_kind = tk.StringVar(value="Auto")
-        self.pca_cmap = tk.StringVar(value="Red → Blue")
-        self._pca_colorbar = None
-        self._meta_cache = (None, None, None)   # (path, mtime, DataFrame)
-
-        # Gene counts tab (expression of one gene in every sample vs a metadata column)
-        self.gene_plot_gene = tk.StringVar(value="")
-        self.gene_plot_var = tk.StringVar(value="")                 # metadata column on the Y axis
-        self.gene_plot_kind = tk.StringVar(value="Auto")
-        self.gene_plot_color_col = tk.StringVar(value=gplot.NO_COLOR)
-        self.gene_plot_color_kind = tk.StringVar(value="Auto")
-        self.gene_plot_cmap = tk.StringVar(value="Red → Blue")
-        self.gene_plot_colorblind = tk.BooleanVar(value=False)
-        self.gene_plot_labels = tk.BooleanVar(value=False)
-        self.gene_plot_trend = tk.BooleanVar(value=False)
-        self.gene_plot_title_var = tk.StringVar(value="")
-        self._gene_colorbar = None
-
-        self.volcano_label_mode_display = tk.StringVar(value=self.LABEL_MODE_DISPLAY[0])
-        self.volcano_label_topn = tk.IntVar(value=15)
-        self.volcano_label_fontsize = tk.IntVar(value=8)
-        self.volcano_label_custom = tk.StringVar(value="")
-        self.volcano_leader_lines = tk.BooleanVar(value=True)
-        self.volcano_color_up = tk.StringVar(value=PALETTE["up"])
-        self.volcano_color_down = tk.StringVar(value=PALETTE["down"])
-        self.volcano_color_ns = tk.StringVar(value=PALETTE["ns"])
-        self.volcano_point_size = tk.DoubleVar(value=18)
-        self.volcano_point_alpha = tk.DoubleVar(value=0.7)
-        self.volcano_title_var = tk.StringVar(value="")
-
-        self.gsea_title_var = tk.StringVar(value="")
-        self.gsea_show_asterisks = tk.BooleanVar(value=True)
-
-        self.run_ora = tk.BooleanVar(value=True)
-        self.ora_direction_display = tk.StringVar(value=self.ORA_DIRECTION_DISPLAY[0])
-        self.top_n_ora = tk.IntVar(value=15)
-        self.ora_chart_type = tk.StringVar(value="Bar")
-        self.ora_title_var = tk.StringVar(value="")
-        self._ora_colorbar = None
-
-        self.table_regulation_filter = tk.StringVar(value=self.REGULATION_FILTER_OPTIONS[0])
-
-        self.available_groups: list[str] = []
-        self.test_group_var = tk.StringVar(value="")   # numerator (log2FC > 0 = higher here)
-        self.ref_group_var = tk.StringVar(value="")    # denominator / reference
-        self.contrast_preview_var = tk.StringVar(value="")
-        self._contrast_combos: list = []                # one contrast selector per tab
-        self._direction_vars: dict[str, tk.StringVar] = {}  # one direction label per tab
         self.results: engine.RunResults | None = None
         self.run_params: dict | None = None
         self._pending_params: dict | None = None
-        self.active_tag: tk.StringVar = tk.StringVar(value="")
-        self.test_group_var.trace_add("write", lambda *a: self._update_contrast_preview())
-        self.ref_group_var.trace_add("write", lambda *a: self._update_contrast_preview())
-        self.pairwise_all.trace_add("write", lambda *a: self._update_contrast_preview())
+        self._pending_group_restore = None
+        self.available_groups: list[str] = []
+        self.active_tag = ""
+        self.active_key = "setup"
+        self._meta_cache = (None, None, None)
+        self._contrast_combos: list[QComboBox] = []
+        self._direction_labels: dict[str, QLabel] = {}
+        self._result_pages: list[ResultPage] = []
+        self._workers: list[Worker] = []
+        self._pca_colorbar = self._gene_colorbar = self._ora_colorbar = None
+        self._gene_plot_frame = None
+        self._run_start: float | None = None
 
-        self._run_start_time: float | None = None
-        self._timer_job = None
-
-        self._build_layout()
-        self._check_environment()
+        self._build_ui()
+        self._build_shortcuts()
+        geo = QSettings("DEAExplorer", "Main").value("geometry")
+        if geo is not None:
+            self.restoreGeometry(geo)
+        self.toast = Toast(self.centralWidget())
         self._validate_setup()
+        self._update_contrast_preview()
+        self.statusBar().showMessage("Ready.")
+        QTimer.singleShot(400, self._check_environment)
 
-    def _check_environment(self):
-        problems = engine.check_environment()
-        if problems:
-            messagebox.showwarning(
-                "Environment check",
-                "Some issues were detected:\n\n" + "\n".join(f"- {p}" for p in problems)
-            )
+    def _build_ui(self):
+        root = QWidget()
+        root.setObjectName("root")
+        self.setCentralWidget(root)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self._build_header())
 
-    def _show_help(self, tab_key: str):
-        """Opens a window showing the explanation and usage instructions
-        for the given tab (from HELP_CONTENT)."""
-        content = HELP_CONTENT.get(tab_key)
-        if not content:
+        body = QHBoxLayout()
+        body.setSpacing(0)
+        body.addWidget(self._build_sidebar())
+        self.pages = QStackedWidget()
+        self.pages.setObjectName("page")
+        body.addWidget(self.pages, 1)
+        outer.addLayout(body, 1)
+
+        self._page_widgets: dict[str, QWidget] = {}
+        builders = {"setup": self._build_setup_page, "pca": self._build_pca_page, "volcano": self._build_volcano_page,
+                    "table": self._build_table_page, "gsea": self._build_gsea_page, "ora": self._build_ora_page,
+                    "genes": self._build_genes_page, "log": self._build_log_page}
+        for key, *_ in self.PAGES:
+            w = builders[key]()
+            self._page_widgets[key] = w
+            self.pages.addWidget(w)
+
+        self.run_elapsed = QLabel("")
+        self.statusBar().addPermanentWidget(self.run_elapsed)
+        self.statusBar().setSizeGripEnabled(False)
+
+        self.metadata_dz.pathChanged.connect(lambda *_: (self._validate_setup(), self._refresh_pca_color_columns(), self._refresh_gene_plot_columns()))
+        self.counts_dz.pathChanged.connect(lambda *_: self._validate_setup())
+        self._switch_page("setup", animate=False)
+
+    def _build_header(self) -> QFrame:
+        h = QFrame()
+        h.setObjectName("header")
+        h.setFixedHeight(66)
+        lay = QHBoxLayout(h)
+        lay.setContentsMargins(22, 0, 22, 0)
+        lay.setSpacing(12)
+        script_dir = Path(__file__).resolve().parent
+        logo = script_dir / "GUI_logo.png"
+        title = QLabel("DEA Explorer")
+        title.setObjectName("appTitle")
+        badge = QLabel("BETA")
+        badge.setObjectName("badge")
+        sub = QLabel("Differential Expression & Gene Set Enrichment Analysis")
+        sub.setObjectName("appSubtitle")
+        lay.addWidget(title)
+        lay.addWidget(badge, alignment=Qt.AlignVCenter)
+        lay.addSpacing(18)
+        lay.addWidget(sub)
+        lay.addStretch()
+        help_btn = QPushButton("?  Help")
+        help_btn.setObjectName("headerBtn")
+        help_btn.setCursor(Qt.PointingHandCursor)
+        help_btn.setToolTip("Explanation of the current page (F1).")
+        help_btn.clicked.connect(lambda: self._show_help(self.active_key))
+        lay.addWidget(help_btn)
+        if logo.exists():
+            pm = QPixmap(str(logo))
+            if not pm.isNull():
+                lbl = QLabel()
+                lbl.setPixmap(pm.scaledToHeight(44, Qt.SmoothTransformation))
+                lay.addSpacing(10)
+                lay.addWidget(lbl)
+        return h
+
+    def _build_sidebar(self) -> QFrame:
+        sb = QFrame()
+        sb.setObjectName("sidebar")
+        sb.setFixedWidth(232)
+        lay = QVBoxLayout(sb)
+        lay.setContentsMargins(0, 6, 0, 8)
+        lay.setSpacing(0)
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+        self._nav_buttons: dict[str, NavButton] = {}
+        for key, badge, title, section in self.PAGES:
+            if section:
+                s = QLabel(section)
+                s.setObjectName("sideSection")
+                lay.addWidget(s)
+            b = NavButton(badge, title)
+            b.clicked.connect(lambda _=False, k=key: self._switch_page(k))
+            self._nav_group.addButton(b)
+            self._nav_buttons[key] = b
+            lay.addWidget(b)
+        lay.addStretch()
+        foot = QLabel("Ctrl+R run  ·  F1 help\nCtrl+1…7 switch page\nCtrl+H heatmap  ·  Ctrl+E export")
+        foot.setObjectName("sideFoot")
+        lay.addWidget(foot)
+        return sb
+
+    def _build_shortcuts(self):
+        QShortcut(QKeySequence("F1"), self, activated=lambda: self._show_help(self.active_key))
+        QShortcut(QKeySequence("Ctrl+R"), self, activated=lambda: self.run_button.isEnabled() and self._run_analysis())
+        for i, (key, *_rest) in enumerate(self.PAGES[:7], start=1):
+            QShortcut(QKeySequence(f"Ctrl+{i}"), self, activated=lambda k=key: self._switch_page(k))
+        QShortcut(QKeySequence("Ctrl+8"), self, activated=lambda: self._switch_page("log"))
+        QShortcut(QKeySequence("Ctrl+H"), self, activated=self._open_heatmap)
+        QShortcut(QKeySequence("Ctrl+E"), self, activated=self._export_current_figure)
+
+    def _export_current_figure(self):
+        panels = {"pca": "pca_panel", "volcano": "volcano_panel", "gsea": "gsea_panel", "ora": "ora_panel",
+                  "genes": "gene_panel"}
+        panel = getattr(self, panels.get(self.active_key, ""), None)
+        if panel is None or self.results is None:
+            self.notify("Open a chart page (PCA, Volcano, GSEA, ORA, Gene counts) after running an analysis.")
             return
+        panel._open_export_dialog()
 
-        dlg = tk.Toplevel(self)
-        dlg.title(content["title"])
-        dlg.geometry("640x560")
-        dlg.configure(bg=PALETTE["bg_card"])
-        dlg.transient(self.winfo_toplevel())
+    def _gene_to_counts(self, gene: str | None):
+        if not gene:
+            return
+        self.gene_entry.setText(str(gene))
+        self._switch_page("genes")
+        self._draw_gene_plot()
 
-        header = tk.Frame(dlg, bg=PALETTE["accent"])
-        header.pack(side=tk.TOP, fill=tk.X)
-        tk.Label(header, text=content["title"], font=FONT_HEADER, fg="white",
-                 bg=PALETTE["accent"]).pack(anchor="w", padx=16, pady=12)
+    def _switch_page(self, key: str, animate: bool = True):
+        self.active_key = key
+        self._nav_buttons[key].setChecked(True)
+        w = self._page_widgets[key]
+        self.pages.setCurrentWidget(w)
+        if animate:
+            fade_in(w)
 
-        notebook = ttk.Notebook(dlg)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    @staticmethod
+    def _spin(lo, hi, val, step=1, decimals=None, width=84):
+        if decimals is None:
+            s = QSpinBox()
+            s.setRange(int(lo), int(hi))
+            s.setSingleStep(int(step))
+            s.setValue(int(val))
+        else:
+            s = QDoubleSpinBox()
+            s.setDecimals(decimals)
+            s.setRange(lo, hi)
+            s.setSingleStep(step)
+            s.setValue(val)
+        s.setMinimumWidth(width)
+        return s
 
-        def make_text_tab(text: str) -> ttk.Frame:
-            tab = ttk.Frame(notebook)
-            txt = scrolledtext.ScrolledText(tab, wrap="word", font=FONT_BASE,
-                                             bg="white", fg=PALETTE["text"], padx=10, pady=10)
-            txt.insert("1.0", text)
-            txt.configure(state="disabled")
-            txt.pack(fill=tk.BOTH, expand=True)
-            return tab
+    @staticmethod
+    def _combo(items, current=None, editable=False, width=None):
+        c = QComboBox()
+        c.setEditable(editable)
+        c.addItems(list(items))
+        if current is not None:
+            c.setCurrentText(current)
+        if width:
+            c.setMinimumWidth(width)
+        return c
 
-        notebook.add(make_text_tab(content["meaning"]), text="What it means")
-        notebook.add(make_text_tab(content["usage"]), text="How to use it")
+    def _debounce(self, fn, ms=220):
+        t = QTimer(self)
+        t.setSingleShot(True)
+        t.setInterval(ms)
+        t.timeout.connect(fn)
+        return lambda *_: t.start()
 
-        btns = ttk.Frame(dlg)
-        btns.pack(fill=tk.X, padx=10, pady=(0, 10))
-        ttk.Button(btns, text="Close", style="Accent.TButton", command=dlg.destroy).pack(side=tk.RIGHT)
+    def _page_title(self, title: str, subtitle: str) -> QWidget:
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setContentsMargins(0, 0, 0, 0)
+        l.setSpacing(2)
+        t = QLabel(title)
+        t.setObjectName("h1")
+        s = QLabel(subtitle)
+        s.setObjectName("muted")
+        l.addWidget(t)
+        l.addWidget(s)
+        return w
 
-    def _build_help_button(self, parent, tab_key: str) -> ttk.Button:
-        """Creates a '? Help' button that opens the help window for the
-        given tab, ready to be packed/gridded wherever needed in the
-        caller's layout."""
-        btn = ttk.Button(parent, text="? Help", style="Help.TButton",
-                         command=lambda: self._show_help(tab_key))
-        add_tip(btn, "Opens the explanation of what this tab shows and how to use its controls.")
-        return btn
+    def _contrast_bar(self, kind: str) -> QWidget:
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setContentsMargins(0, 0, 0, 0)
+        l.setSpacing(6)
+        row = QHBoxLayout()
+        lab = QLabel("CONTRAST")
+        lab.setObjectName("fieldLabel")
+        combo = QComboBox()
+        combo.setMinimumWidth(300)
+        combo.currentTextChanged.connect(self._on_contrast_selected)
+        self._contrast_combos.append(combo)
+        row.addWidget(lab)
+        row.addWidget(combo)
+        row.addStretch()
+        l.addLayout(row)
+        d = QLabel("")
+        d.setObjectName("direction")
+        d.setWordWrap(True)
+        d.setVisible(False)
+        self._direction_labels[kind] = d
+        l.addWidget(d)
+        return w
 
-    def _build_layout(self):
-        self._build_header()
+    def _result_layout(self, kind: str, title: str, subtitle: str, main: QWidget, inspector: QWidget | None,
+                       empty_text: str = "Run an analysis from the Setup page to see this view.",
+                       with_contrast: bool = True) -> ResultPage:
+        content = QWidget()
+        v = QVBoxLayout(content)
+        v.setContentsMargins(24, 18, 24, 18)
+        v.setSpacing(12)
+        head = QHBoxLayout()
+        head.addWidget(self._page_title(title, subtitle))
+        head.addStretch()
+        v.addLayout(head)
+        if with_contrast:
+            v.addWidget(self._contrast_bar(kind))
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        row.addWidget(main, 1)
+        if inspector is not None:
+            row.addWidget(_scroll(inspector, 322))
+        v.addLayout(row, 1)
+        page = ResultPage(content, empty_text)
+        self._result_pages.append(page)
+        return page
 
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(8, 0))
+    @staticmethod
+    def _inspector(*cards: QWidget) -> QWidget:
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setContentsMargins(0, 0, 6, 0)
+        l.setSpacing(12)
+        for c in cards:
+            l.addWidget(c)
+        l.addStretch()
+        return w
 
-        self.tab_setup = ttk.Frame(self.notebook)
-        self.tab_pca = ttk.Frame(self.notebook)
-        self.tab_volcano = ttk.Frame(self.notebook)
-        self.tab_table = ttk.Frame(self.notebook)
-        self.tab_gsea = ttk.Frame(self.notebook)
-        self.tab_ora = ttk.Frame(self.notebook)
-        self.tab_genes = ttk.Frame(self.notebook)
-        self.tab_log = ttk.Frame(self.notebook)
+    @staticmethod
+    def _table_view(model: DataFrameModel) -> QTableView:
+        t = QTableView()
+        t.setModel(model)
+        t.setAlternatingRowColors(True)
+        t.setSelectionBehavior(QTableView.SelectRows)
+        t.setEditTriggers(QTableView.NoEditTriggers)
+        t.setSortingEnabled(True)
+        t.verticalHeader().setVisible(False)
+        t.verticalHeader().setDefaultSectionSize(30)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        t.horizontalHeader().setSortIndicatorShown(True)
+        t.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        t.setShowGrid(False)
+        return t
 
-        self.notebook.add(self.tab_setup, text="1 · Setup & Parameters")
-        self.notebook.add(self.tab_pca, text="2 · PCA")
-        self.notebook.add(self.tab_volcano, text="3 · Volcano Plot")
-        self.notebook.add(self.tab_table, text="4 · Gene Table")
-        self.notebook.add(self.tab_gsea, text="5 · GSEA / Pathway")
-        self.notebook.add(self.tab_ora, text="6 · ORA / Over-representation")
-        self.notebook.add(self.tab_genes, text="7 · Gene counts")
-        self.notebook.add(self.tab_log, text="Log")
+    def _build_setup_page(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        inner = QWidget()
+        col = QVBoxLayout(inner)
+        col.setContentsMargins(28, 22, 28, 24)
+        col.setSpacing(14)
+        col.addWidget(self._page_title("Setup & parameters", "Load the data, choose the two groups to compare and set the thresholds. Then run the analysis."))
 
-        self._build_setup_tab(self._make_scrollable(self.tab_setup))
-        self._build_pca_tab(self._make_scrollable(self.tab_pca))
-        self._build_volcano_tab(self._make_scrollable(self.tab_volcano))
-        self._build_table_tab(self._make_scrollable(self.tab_table))
-        self._build_gsea_tab(self._make_scrollable(self.tab_gsea))
-        self._build_ora_tab(self._make_scrollable(self.tab_ora))
-        self._build_genes_tab(self._make_scrollable(self.tab_genes))
-        self._build_log_tab(self._make_scrollable(self.tab_log))
+        st = Card()
+        sl = QHBoxLayout()
+        sl.setSpacing(10)
+        self.chip_counts = Chip("○  Counts file not selected")
+        self.chip_meta = Chip("○  Metadata file not selected")
+        self.chip_groups = Chip("○  Groups not yet extracted")
+        for c in (self.chip_counts, self.chip_meta, self.chip_groups):
+            sl.addWidget(c)
+        sl.addStretch()
+        st.body().addLayout(sl)
+        col.addWidget(st)
 
-        status_frame = tk.Frame(self, bg=PALETTE["accent_pale_2"])
-        status_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(status_frame, textvariable=self.status_var, anchor="w",
-                  background=PALETTE["accent_pale_2"], foreground=PALETTE["accent"],
-                  font=FONT_SMALL, padding=(10, 5)).pack(fill=tk.X)
+        files = Card("Input files", "Drag & drop a file onto a box, or click it to browse.")
+        dz = QHBoxLayout()
+        dz.setSpacing(14)
+        self.counts_dz = DropZone("Counts file", "csv · tsv · txt · xlsx · xls · json", "+", self._pick_counts)
+        self.metadata_dz = DropZone("Metadata file", "csv · tsv · txt · xlsx · xls · json", "+", self._pick_metadata)
+        dz.addWidget(self.counts_dz)
+        dz.addWidget(self.metadata_dz)
+        files.body().addLayout(dz)
 
-    def _make_scrollable(self, tab: ttk.Frame) -> ttk.Frame:
-        sf = ScrollableFrame(tab)
-        sf.pack(fill=tk.BOTH, expand=True)
-        return sf.inner
+        cols = QGridLayout()
+        cols.setHorizontalSpacing(14)
+        self.gene_col = QLineEdit("1")
+        self.sample_col = QLineEdit("1")
+        self.condition_col = QLineEdit("3")
+        for e in (self.gene_col, self.sample_col, self.condition_col):
+            e.setMaximumWidth(150)
+        cols.addWidget(field("Gene column", self.gene_col,
+                             "Column number (1 = first column) or exact name of the column with the gene "
+                             "identifiers in the counts file."), 0, 0)
+        cols.addWidget(field("Metadata: sample column", self.sample_col,
+                             "Column of the metadata file with the sample IDs (must match the counts columns)."), 0, 1)
+        cols.addWidget(field("Metadata: condition column", self.condition_col,
+                             "Column of the metadata file with the experimental group of each sample."), 0, 2)
+        reset = QPushButton("Reset fields")
+        reset.setToolTip("Clears all the fields in this section so you can start over.")
+        reset.clicked.connect(self._reset_setup_fields)
+        cols.addWidget(reset, 0, 3, alignment=Qt.AlignBottom)
+        cols.setColumnStretch(4, 1)
+        files.body().addLayout(cols)
+        hint = QLabel("Columns accept a number (1 = first column) or the exact column name.")
+        hint.setObjectName("cardHint")
+        files.body().addWidget(hint)
+        col.addWidget(files)
 
-    def _build_header(self):
-        header = tk.Frame(self, bg=PALETTE["accent"])
-        header.pack(side=tk.TOP, fill=tk.X)
-        try:
-            logo_icon = tk.PhotoImage(file="logo.png")
-            logo_small = logo_icon.subsample(3, 3)
-        except tk.TclError:
-            logo_small = None
+        meth = Card("Statistical method", "Standard RNA-seq count data require DESeq2.")
+        mr = QHBoxLayout()
+        mr.setSpacing(22)
+        self.rb_rna = QRadioButton("RNA-seq → DESeq2 (Wald test)")
+        self.rb_rna.setChecked(True)
+        self.rb_rna.setToolTip("Raw RNA-seq counts (integers, not normalized). Uses DESeq2.")
+        self.rb_micro = QRadioButton("Microarray → limma (eBayes)")
+        self.rb_micro.setToolTip("Microarray intensities (typically log-transformed). Uses limma.")
+        self.species = self._combo(engine.SPECIES_CHOICES.keys(), width=230)
+        self.species.setToolTip(
+            "Species of the data: decides how Ensembl/Entrez IDs become gene symbols and which MSigDB sets are "
+            "used for GSEA/ORA. For mouse, rat or zebrafish the annotation package must be installed in R "
+            "(org.Mm.eg.db, org.Rn.eg.db, org.Dr.eg.db).")
+        mr.addWidget(self.rb_rna)
+        mr.addWidget(self.rb_micro)
+        mr.addSpacing(10)
+        mr.addWidget(field("Organism", self.species))
+        mr.addStretch()
+        meth.body().addLayout(mr)
+        col.addWidget(meth)
 
-        inner = tk.Frame(header, bg=PALETTE["accent"])
-        inner.pack(fill=tk.X, padx=24, pady=(16, 14))
+        grp = Card("Groups to compare")
+        top = QHBoxLayout()
+        self.extract_btn = QPushButton("Extract groups from metadata")
+        self.extract_btn.setToolTip("Reads the metadata file and lists every condition with its sample count.")
+        self.extract_btn.clicked.connect(self._extract_groups)
+        top.addWidget(self.extract_btn)
+        top.addStretch()
+        grp.body().addLayout(top)
 
-        if logo_small is not None:
-            logo_header = tk.Label(inner, image=logo_small, bg=PALETTE["accent"])
-            logo_header.image = logo_small 
-            logo_header.pack(side=tk.RIGHT, padx=15, pady=5)
+        g = QGridLayout()
+        g.setHorizontalSpacing(14)
+        self.test_combo = self._combo([], width=250)
+        self.test_combo.setToolTip("log2FC > 0 (and positive NES in GSEA) means HIGHER in this group.")
+        self.ref_combo = self._combo([], width=250)
+        self.ref_combo.setToolTip("The baseline: the group the test group is compared against (denominator).")
+        self.test_combo.setPlaceholderText("Select a group…")
+        self.ref_combo.setPlaceholderText("Select a group…")
+        self.swap_btn = QPushButton("Swap")
+        g.addWidget(field("Test group (numerator)", self.test_combo), 0, 0)
+        g.addWidget(field("Reference group (denominator)", self.ref_combo), 0, 1)
+        g.addWidget(self.swap_btn, 0, 2, alignment=Qt.AlignBottom)
+        g.setColumnStretch(3, 1)
+        grp.body().addLayout(g)
+        self.contrast_preview = QLabel("")
+        self.contrast_preview.setObjectName("direction")
+        self.contrast_preview.setWordWrap(True)
+        grp.body().addWidget(self.contrast_preview)
+        self.groups_info = QLabel("")
+        self.groups_info.setObjectName("cardHint")
+        self.groups_info.setWordWrap(True)
+        grp.body().addWidget(self.groups_info)
 
-        title_row = tk.Frame(inner, bg=PALETTE["accent"])
-        title_row.pack(fill="x", anchor="w")
-        tk.Label(title_row, text="DEA Explorer", font=("Trebuchet MS", 21, "bold"),
-                 fg="white", bg=PALETTE["accent"]).pack(side=tk.LEFT)
-        badge = tk.Label(title_row, text=" BETA ", font=("Trebuchet MS", 9, "bold"),
-                          fg=PALETTE["accent"], bg=PALETTE["accent_soft"], padx=2)
-        badge.pack(side=tk.LEFT, padx=(10, 0), pady=(4, 0))
+        self.pairwise = QCheckBox("Compare ALL pairs of groups (pairwise)")
+        self.pairwise.setToolTip("Analyzes every possible pair of groups instead of one two-group comparison.")
+        grp.body().addWidget(self.pairwise)
+        self.gene_list = QLineEdit()
+        self.gene_list.setPlaceholderText("e.g. TP53, BRCA1, MYC   (empty = all genes)")
+        self.gene_list.setToolTip(
+            "Optional: gene symbols separated by commas. If filled, ONLY these genes are used for the analysis "
+            "(PCA included); ORA/GSEA are skipped. Leave empty to analyze all genes.")
+        grp.body().addWidget(field("Genes to analyze (optional)", self.gene_list))
+        col.addWidget(grp)
 
-        tk.Label(inner, text="Differential Expression & Gene Set Enrichment Analysis",
-                 font=("Monotype Corsiva", 20), fg=PALETTE["accent_pale"],
-                 bg=PALETTE["accent"]).pack(fill="x", anchor="w", pady=(3, 0))
+        self.swap_btn.clicked.connect(self._swap_groups)
+        self.test_combo.currentTextChanged.connect(lambda *_: self._update_contrast_preview())
+        self.ref_combo.currentTextChanged.connect(lambda *_: self._update_contrast_preview())
+        self.pairwise.toggled.connect(lambda *_: self._toggle_pairwise())
+        self._toggle_pairwise()
 
-        accent_line = tk.Frame(self, bg=PALETTE["accent_soft"], height=3)
-        accent_line.pack(side=tk.TOP, fill=tk.X)
+        par = Card("Analysis parameters")
+        pg = QGridLayout()
+        pg.setHorizontalSpacing(18)
+        pg.setVerticalSpacing(12)
+        self.padj_cutoff = self._spin(0.001, 1.0, 0.05, 0.005, 3)
+        self.padj_cutoff.setToolTip("Significance threshold on the multiple-testing corrected p-value. Typical: 0.05.")
+        self.lfc_cutoff = self._spin(0.0, 10.0, 1.0, 0.25, 2)
+        self.lfc_cutoff.setToolTip("Minimum expression change (log2) to call a gene up/down. Typical: 1 (= 2-fold).")
+        self.gsea_category = self._combo(["H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"], "H", editable=True)
+        self.gsea_category.setToolTip("MSigDB collection for GSEA/ORA. 'H' (Hallmark) is a good generic start.")
+        self.gsea_subcategory = QLineEdit()
+        self.gsea_subcategory.setPlaceholderText("e.g. CP:KEGG")
+        self.gsea_subcategory.setToolTip("Optional: restricts the category to a subcategory (e.g. CP:KEGG in C2).")
+        pg.addWidget(field("q-value (padj) cutoff", self.padj_cutoff), 0, 0)
+        pg.addWidget(field("log2FoldChange cutoff", self.lfc_cutoff), 0, 1)
+        pg.addWidget(field("MSigDB category", self.gsea_category), 0, 2)
+        pg.addWidget(field("Subcategory (optional)", self.gsea_subcategory), 0, 3)
 
-    def _build_setup_tab(self, f):
-        pad = {"padx": 8, "pady": 6}
+        self.min_counts = QSlider(Qt.Horizontal)
+        self.min_counts.setRange(0, 500)
+        self.min_counts.setValue(10)
+        self.min_counts_lbl = QLabel("10")
+        self.min_counts_lbl.setMinimumWidth(34)
+        self.min_counts_lbl.setStyleSheet(f"font-weight: 700; color: {PALETTE['ink']};")
+        self.min_counts.valueChanged.connect(lambda v: self.min_counts_lbl.setText(str(v)))
+        mcw = QWidget()
+        mcl = QHBoxLayout(mcw)
+        mcl.setContentsMargins(0, 0, 0, 0)
+        mcl.addWidget(self.min_counts, 1)
+        mcl.addWidget(self.min_counts_lbl)
+        mcf = field("Minimum counts filter (RNA-seq)", mcw,
+                    "Removes genes whose total count across the compared samples is below this value. "
+                    "Default 10. Not applied to microarray data.")
+        pg.addWidget(mcf, 1, 0, 1, 2)
 
-        top_bar = ttk.Frame(f)
-        top_bar.pack(fill=tk.X, padx=10, pady=(10, 0))
-        self._build_help_button(top_bar, "setup").pack(anchor="center", pady=(10, 5))
+        self.run_ora = QCheckBox("Run ORA (over-representation)")
+        self.run_ora.setChecked(True)
+        self.run_ora.setToolTip("Also runs ORA on the significant genes (same cutoffs and MSigDB category).")
+        self.ora_dir = self._combo(self.ORA_DIRECTION_DISPLAY)
+        self.ora_dir.setToolTip("Which significant genes are tested: all DEGs, only up or only down.")
+        pg.addWidget(self.run_ora, 2, 0, 1, 1, alignment=Qt.AlignBottom)
+        pg.addWidget(field("ORA gene list", self.ora_dir), 2, 1, 1, 3)
+        par.body().addLayout(pg)
+        col.addWidget(par)
 
-        status_frame = ttk.LabelFrame(f, text="Preparation status")
-        status_frame.pack(fill=tk.X, padx=10, pady=(10, 8))
-        self.chk_counts_lbl = ttk.Label(status_frame, text="○ Counts file not selected",
-                                         style="CardMuted.TLabel")
-        self.chk_counts_lbl.grid(row=0, column=0, sticky="w", padx=10, pady=3)
-        self.chk_metadata_lbl = ttk.Label(status_frame, text="○ Metadata file not selected",
-                                           style="CardMuted.TLabel")
-        self.chk_metadata_lbl.grid(row=1, column=0, sticky="w", padx=10, pady=3)
-        self.chk_groups_lbl = ttk.Label(status_frame, text="○ Groups not yet extracted",
-                                         style="CardMuted.TLabel")
-        self.chk_groups_lbl.grid(row=2, column=0, sticky="w", padx=10, pady=3)
+        act = Card()
+        ar = QHBoxLayout()
+        ar.setSpacing(10)
+        self.run_button = QPushButton("Run analysis")
+        self.run_button.setObjectName("primary")
+        self.run_button.setToolTip("Runs DESeq2/limma + ORA + GSEA with the parameters above (Ctrl+R).")
+        self.run_button.clicked.connect(self._run_analysis)
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setFixedWidth(220)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        save_b = QPushButton("Save settings")
+        save_b.setToolTip("Saves files, columns, groups, genes, cutoffs and GSEA/ORA options to a JSON file.")
+        save_b.clicked.connect(self._save_settings)
+        load_b = QPushButton("Load settings")
+        load_b.setToolTip("Loads a settings JSON and fills every field to repeat the same analysis.")
+        load_b.clicked.connect(self._load_settings)
+        self.report_button = QPushButton("PDF report")
+        self.report_button.setToolTip("Detailed PDF of the finished analysis: parameters, PCA, volcano, top DEGs, "
+                                      "GSEA, ORA and log. Enabled once an analysis has finished.")
+        self.report_button.setEnabled(False)
+        self.report_button.clicked.connect(self._export_pdf_report)
+        ar.addWidget(self.run_button)
+        ar.addWidget(self.progress)
+        ar.addStretch()
+        ar.addWidget(save_b)
+        ar.addWidget(load_b)
+        ar.addWidget(self.report_button)
+        act.body().addLayout(ar)
+        col.addWidget(act)
+        col.addStretch()
 
-        file_frame = ttk.LabelFrame(f, text="Input files")
-        file_frame.pack(fill=tk.X, padx=10, pady=8)
+        redraw = self._debounce(self._on_cutoffs_changed)
+        self.padj_cutoff.valueChanged.connect(redraw)
+        self.lfc_cutoff.valueChanged.connect(redraw)
 
-        dropzones_row = ttk.Frame(file_frame)
-        dropzones_row.pack(fill=tk.X, padx=10, pady=(12, 4))
-        dropzones_row.columnconfigure(0, weight=1)
-        dropzones_row.columnconfigure(1, weight=1)
+        v.addWidget(_scroll(inner))
+        return page
 
-        self.counts_dropzone = DropZone(
-            dropzones_row, title="Counts file", icon="🧬",
-            subtitle="csv · tsv · txt · xlsx · xls · json",
-            path_var=self.counts_path, pick_command=self._pick_counts)
-        self.counts_dropzone.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    def _pick_counts(self):
+        p = open_file_dialog(self, "Select the counts file")
+        if p:
+            self.counts_dz.set_path(p)
 
-        self.metadata_dropzone = DropZone(
-            dropzones_row, title="Metadata file", icon="🗂️",
-            subtitle="csv · tsv · txt · xlsx · xls · json",
-            path_var=self.metadata_path, pick_command=self._pick_metadata)
-        self.metadata_dropzone.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+    def _pick_metadata(self):
+        p = open_file_dialog(self, "Select the metadata file")
+        if p:
+            self.metadata_dz.set_path(p)
 
-        if not HAS_DND:
-            ttk.Label(file_frame,
-                      text="Tip: install 'tkinterdnd2' (pip install tkinterdnd2) to "
-                           "be able to drag files directly into the boxes above.",
-                      style="Muted.TLabel", wraplength=800).pack(fill=tk.X, padx=12, pady=(2, 8))
+    @property
+    def counts_path(self) -> str:
+        return self.counts_dz.path()
 
-        self.counts_entry = None
-        self.metadata_entry = None
+    @property
+    def metadata_path(self) -> str:
+        return self.metadata_dz.path()
 
-        cols_frame = ttk.Frame(file_frame)
-        cols_frame.pack(fill=tk.X, padx=10, pady=(6, 10))
+    def _method(self) -> str:
+        return "RNAseq" if self.rb_rna.isChecked() else "Microarray"
 
-        gc_entry = ttk.Entry(cols_frame, textvariable=self.gene_col, width=10)
-        ttk.Label(cols_frame, text="Gene column (index or name):").grid(row=0, column=0, sticky="w", **pad)
-        gc_entry.grid(row=0, column=1, sticky="w", **pad)
-        add_tip(gc_entry, "Column number (1 = first column) or exact name of the column "
-                          "that contains the gene identifiers in the counts file.")
+    def _species_value(self) -> str:
+        return engine.SPECIES_CHOICES.get(self.species.currentText(), engine.DEFAULT_SPECIES)
 
-        sc_entry = ttk.Entry(cols_frame, textvariable=self.sample_col, width=10)
-        ttk.Label(cols_frame, text="Metadata sample column (index or name):").grid(
-            row=1, column=0, sticky="w", **pad)
-        sc_entry.grid(row=1, column=1, sticky="w", **pad)
-        add_tip(sc_entry, "Column of the metadata file containing the sample IDs (must "
-                          "match the columns of the counts file).")
+    @staticmethod
+    def _parse_col(value: str):
+        value = value.strip()
+        return int(value) if value.isdigit() else value
 
-        cc_entry = ttk.Entry(cols_frame, textvariable=self.condition_col, width=10)
-        ttk.Label(cols_frame, text="Metadata condition column (index or name):").grid(
-            row=2, column=0, sticky="w", **pad)
-        cc_entry.grid(row=2, column=1, sticky="w", **pad)
-        add_tip(cc_entry, "Column of the metadata file containing the experimental "
-                          "group/condition of each sample (e.g. 'Drug' / 'Control').")
-
-        reset_btn = ttk.Button(cols_frame, text="↺ Reset fields", command=self._reset_setup_fields)
-        reset_btn.grid(row=0, column=2, rowspan=3, padx=(30, 8), pady=6, sticky="ns")
-        add_tip(reset_btn, "Clears all the fields in this section so you can start over.")
-
-        method_frame = ttk.LabelFrame(f, text="Statistical method (chosen by the user: StandHard datasets require DeSeq2)")
-        method_frame.pack(fill=tk.X, padx=10, pady=8)
-        rb1 = ttk.Radiobutton(method_frame, text="RNA-seq -> DESeq2 (Wald test)",
-                               variable=self.method, value="RNAseq")
-        rb1.pack(side=tk.LEFT, padx=12, pady=8)
-        add_tip(rb1, "Choose this option if your data are raw RNA-seq counts (integers, "
-                     "not normalized). The analysis will use DESeq2.")
-        rb2 = ttk.Radiobutton(method_frame, text="Microarray -> limma (eBayes)",
-                               variable=self.method, value="Microarray")
-        rb2.pack(side=tk.LEFT, padx=12, pady=8)
-        add_tip(rb2, "Choose this option if your data are microarray intensity values "
-                     "(typically already log-transformed). The analysis will use limma.")
-        ttk.Label(method_frame, text="   Organism:").pack(side=tk.LEFT, padx=(24, 4), pady=8)
-        species_combo = ttk.Combobox(method_frame, textvariable=self.species_display, state="readonly",
-                                      width=26, values=list(engine.SPECIES_CHOICES.keys()))
-        species_combo.pack(side=tk.LEFT, pady=8)
-        add_tip(species_combo, "Species of the data. It decides how Ensembl/Entrez IDs are converted to gene "
-                               "symbols and which MSigDB gene sets are used for GSEA/ORA. For mouse, rat or "
-                               "zebrafish the matching annotation package must be installed in R "
-                               "(org.Mm.eg.db, org.Rn.eg.db, org.Dr.eg.db).")
-
-        group_frame = ttk.LabelFrame(f, text="Groups to compare")
-        group_frame.pack(fill=tk.X, padx=10, pady=8)
-        extract_btn = ttk.Button(group_frame, text="Extract groups from metadata",
-                                  command=self._extract_groups)
-        extract_btn.grid(row=0, column=0, **pad)
-        add_tip(extract_btn, "Reads the metadata file and shows below all the conditions "
-                              "found, with the number of samples per condition.")
-        self.groups_container = ttk.Frame(group_frame)
-        self.groups_container.grid(row=1, column=0, columnspan=3, sticky="w", **pad)
-        pairwise_cb = ttk.Checkbutton(group_frame, text="Compare ALL pairs of groups (pairwise)",
-                                      variable=self.pairwise_all, command=self._toggle_pairwise)
-        pairwise_cb.grid(row=2, column=0, sticky="w", **pad)
-        add_tip(pairwise_cb, "If enabled, automatically analyzes every possible pair of "
-                              "groups instead of one specific two-group comparison.")
-
-        genes_lbl = ttk.Label(group_frame, text="Genes to analyze (comma-separated, empty = all):")
-        genes_lbl.grid(row=3, column=0, sticky="w", **pad)
-        genes_entry = ttk.Entry(group_frame, textvariable=self.gene_list_var, width=60)
-        genes_entry.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
-        add_tip(genes_entry, "Optional: gene symbols separated by commas (e.g. TP53, BRCA1, MYC). "
-                              "If filled, ONLY these genes are used for the analysis (PCA included); "
-                              "ORA/GSEA are skipped. Leave empty to analyze all genes.")
-
-        param_frame = ttk.LabelFrame(f, text="Analysis parameters (customizable)")
-        param_frame.pack(fill=tk.X, padx=10, pady=8)
-
-        row_idx = 3  
-
-        counts_lbl = ttk.Label(param_frame, text="Minimum counts filter:")
-        counts_lbl.grid(row=row_idx, column=0, sticky="w", padx=5, pady=6)
-        add_tip(counts_lbl, "RNA-seq only: removes genes whose total read/count sum across the samples of "
-                            "the compared groups does not reach this value, improving the statistical "
-                            "power of the test. Default 10. Not applied to microarray data.")
-
-        slider_subframe = ttk.Frame(param_frame)
-        slider_subframe.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=6)
-
-        val_lbl = ttk.Label(slider_subframe, text=f"{self.min_counts_var.get()}", font=FONT_BOLD, width=4, anchor="e")
-        val_lbl.pack(side="right", padx=(5, 0))
-
-        def _update_label_on_write(*args):
-            try:
-                val_lbl.configure(text=str(self.min_counts_var.get()))
-            except Exception:
-                pass
-
-        self.min_counts_var.trace_add("write", _update_label_on_write)
-
-        counts_slider = ttk.Scale(
-            slider_subframe, 
-            from_=0, 
-            to=500, 
-            variable=self.min_counts_var, 
-            orient="horizontal"
-        )
-        counts_slider.pack(side="left", fill="x", expand=True)
-
-        ttk.Label(param_frame, text="q-value (padj) cutoff:").grid(row=0, column=0, sticky="w", **pad)
-        padj_spin = ttk.Spinbox(param_frame, from_=0.001, to=1.0, increment=0.005,
-                                 textvariable=self.padj_cutoff, width=8)
-        padj_spin.grid(row=0, column=1, sticky="w", **pad)
-        add_tip(padj_spin, "Statistical significance threshold (multiple-testing corrected "
-                            "p-value). Typical value: 0.05.")
-
-        ttk.Label(param_frame, text="log2FoldChange cutoff:").grid(row=0, column=2, sticky="w", **pad)
-        lfc_spin = ttk.Spinbox(param_frame, from_=0.0, to=10.0, increment=0.25,
-                                textvariable=self.lfc_cutoff, width=8)
-        lfc_spin.grid(row=0, column=3, sticky="w", **pad)
-        add_tip(lfc_spin, "Minimum expression change threshold (in log2) for a gene to be "
-                           "considered up/down-regulated. Typical value: 1 (= 2-fold).")
-
-        ttk.Label(param_frame, text="MSigDB category (GSEA):").grid(row=1, column=0, sticky="w", **pad)
-        cat_combo = ttk.Combobox(param_frame, textvariable=self.gsea_category, width=8,
-                                  values=["H", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"])
-        cat_combo.grid(row=1, column=1, sticky="w", **pad)
-        add_tip(cat_combo, "MSigDB gene set collection to use for the GSEA. 'H' (Hallmark) "
-                            "is a good generic starting point.")
-
-        ttk.Label(param_frame, text="Subcategory (optional, e.g. CP:KEGG):").grid(
-            row=1, column=2, sticky="w", **pad)
-        subcat_entry = ttk.Entry(param_frame, textvariable=self.gsea_subcategory, width=14)
-        subcat_entry.grid(row=1, column=3, sticky="w", **pad)
-        add_tip(subcat_entry, "Optional: restricts the chosen category to a specific "
-                               "subcategory (e.g. CP:KEGG inside C2).")
-
-        ora_cb = ttk.Checkbutton(param_frame, text="Run ORA (over-representation)",
-                                  variable=self.run_ora)
-        ora_cb.grid(row=2, column=0, columnspan=2, sticky="w", **pad)
-        add_tip(ora_cb, "Also runs the Over-Representation Analysis on the significant genes "
-                         "(same padj / log2FC cutoffs and same MSigDB category as the GSEA).")
-
-        ttk.Label(param_frame, text="ORA gene list:").grid(row=2, column=2, sticky="w", **pad)
-        ora_dir_combo = ttk.Combobox(param_frame, textvariable=self.ora_direction_display,
-                                      values=self.ORA_DIRECTION_DISPLAY, state="readonly", width=52)
-        ora_dir_combo.grid(row=2, column=3, sticky="w", **pad)
-        add_tip(ora_dir_combo, "Which significant genes are tested: all DEGs (up + down together), "
-                                "only the up-regulated or only the down-regulated ones.")
-
-        run_frame = ttk.Frame(f)
-        run_frame.pack(fill=tk.X, padx=10, pady=10)
-        self.run_button = ttk.Button(run_frame, text="Run analysis", style="Accent.TButton",
-                                      command=self._run_analysis, state="disabled")
-        self.run_button.pack(side=tk.LEFT, padx=6, pady=6)
-        add_tip(self.run_button, "Runs DESeq2/limma and GSEA with the parameters set above. "
-                                  "Enabled once the files have been selected.")
-        self.progress = ttk.Progressbar(run_frame, mode="indeterminate", length=250)
-        self.progress.pack(side=tk.LEFT, padx=14)
-        save_set_btn = ttk.Button(run_frame, text="💾 Save settings", command=self._save_settings)
-        save_set_btn.pack(side=tk.LEFT, padx=6, pady=6)
-        add_tip(save_set_btn, "Saves all the analysis settings (files, columns, groups, genes, "
-                              "cutoffs, GSEA/ORA options) to a JSON file.")
-        load_set_btn = ttk.Button(run_frame, text="📂 Load settings", command=self._load_settings)
-        load_set_btn.pack(side=tk.LEFT, padx=6, pady=6)
-        add_tip(load_set_btn, "Loads a settings JSON file and fills in every field, so you can "
-                              "re-run exactly the same analysis (just press 'Run analysis').")
-        self.report_button = ttk.Button(run_frame, text="📄 Download PDF report",
-                                         command=self._export_pdf_report, state="disabled")
-        self.report_button.pack(side=tk.LEFT, padx=6, pady=6)
-        add_tip(self.report_button, "Saves a detailed PDF report of the analysis just completed: "
-                                     "parameters, PCA, volcano plot, top DEGs, GSEA, ORA and the "
-                                     "processing log. Enabled once an analysis has finished.")
-
-        info = ("Tip: select the files, press 'Extract groups from metadata' to see the "
-                "available conditions, check EXACTLY 2 groups (or enable pairwise "
-                "comparison), set the parameters and press 'Run analysis'.")
-        ttk.Label(f, text=info, wraplength=800, style="Muted.TLabel").pack(fill=tk.X, padx=14, pady=(2, 12))
-
-        self.counts_path.trace_add("write", lambda *a: self._validate_setup())
-        self.metadata_path.trace_add("write", lambda *a: self._validate_setup())
-        self.metadata_path.trace_add("write", lambda *a: self._refresh_pca_color_columns())
-        self.metadata_path.trace_add("write", lambda *a: self._refresh_gene_plot_columns())
+    def _gene_list(self) -> list[str]:
+        return [g.strip() for g in re.split(r"[,;\n]+", self.gene_list.text()) if g.strip()]
 
     def _reset_setup_fields(self):
-        self.counts_path.set("")
-        self.metadata_path.set("")
-        self.gene_col.set("1")
-        self.sample_col.set("1")
-        self.condition_col.set("2")
-        self.gene_list_var.set("")
-        for child in self.groups_container.winfo_children():
-            child.destroy()
-        self.test_group_var.set("")
-        self.ref_group_var.set("")
+        self.counts_dz.set_path("")
+        self.metadata_dz.set_path("")
+        self.gene_col.setText("1")
+        self.sample_col.setText("1")
+        self.condition_col.setText("2")
+        self.gene_list.clear()
+        self.test_combo.clear()
+        self.ref_combo.clear()
         self.available_groups = []
+        self.groups_info.clear()
         self._validate_setup()
-        self.status_var.set("Fields reset.")
+        self.statusBar().showMessage("Fields reset.")
 
     def _validate_setup(self):
-        counts_ok = bool(self.counts_path.get().strip())
-        metadata_ok = bool(self.metadata_path.get().strip())
-
-        if hasattr(self, "chk_counts_lbl"):
-            if counts_ok and os.path.isfile(self.counts_path.get()):
-                self.chk_counts_lbl.configure(text="✓ Counts file selected", style="Ok.TLabel")
-            elif counts_ok:
-                self.chk_counts_lbl.configure(text="✗ Counts file path not found", style="Err.TLabel")
-            else:
-                self.chk_counts_lbl.configure(text="○ Counts file not selected", style="CardMuted.TLabel")
-
-        if hasattr(self, "chk_metadata_lbl"):
-            if metadata_ok and os.path.isfile(self.metadata_path.get()):
-                self.chk_metadata_lbl.configure(text="✓ Metadata file selected", style="Ok.TLabel")
-            elif metadata_ok:
-                self.chk_metadata_lbl.configure(text="✗ Metadata file path not found", style="Err.TLabel")
-            else:
-                self.chk_metadata_lbl.configure(text="○ Metadata file not selected", style="CardMuted.TLabel")
-
-        if hasattr(self, "run_button"):
-            self.run_button.configure(state="normal" if (counts_ok and metadata_ok) else "disabled")
+        c, m = self.counts_path.strip(), self.metadata_path.strip()
+        if c and os.path.isfile(c):
+            self.chip_counts.set_state("ok", "●  Counts file selected")
+        elif c:
+            self.chip_counts.set_state("err", "●  Counts file path not found")
+        else:
+            self.chip_counts.set_state("idle", "○  Counts file not selected")
+        if m and os.path.isfile(m):
+            self.chip_meta.set_state("ok", "●  Metadata file selected")
+        elif m:
+            self.chip_meta.set_state("err", "●  Metadata file path not found")
+        else:
+            self.chip_meta.set_state("idle", "○  Metadata file not selected")
+        if not self.run_button.property("running"):
+            self.run_button.setEnabled(bool(c and m))
 
     def _toggle_pairwise(self):
-        pairwise = self.pairwise_all.get()
-        for name, st in (("test_combo", "disabled" if pairwise else "readonly"),
-                         ("ref_combo", "disabled" if pairwise else "readonly"),
-                         ("swap_btn", "disabled" if pairwise else "normal")):
-            w = getattr(self, name, None)
-            try:
-                if w is not None:
-                    w.configure(state=st)
-            except tk.TclError:
-                pass
+        on = self.pairwise.isChecked()
+        for w in (self.test_combo, self.ref_combo, self.swap_btn):
+            w.setEnabled(not on)
         self._update_contrast_preview()
 
     def _update_contrast_preview(self):
-        if self.pairwise_all.get():
-            self.contrast_preview_var.set(
-                "Pairwise mode: every pair is analysed as \"A vs B\" (A comes first alphabetically). "
-                "log2FC > 0 = higher in A.")
-            return
-        t, r = self.test_group_var.get(), self.ref_group_var.get()
-        if not t or not r:
-            self.contrast_preview_var.set("Choose the test group and the reference group.")
-        elif t == r:
-            self.contrast_preview_var.set("✗ The test group and the reference group must be different.")
+        if self.pairwise.isChecked():
+            txt = ('Pairwise mode: every pair is analysed as "A vs B" (A first alphabetically). '
+                   "log2FC > 0 = higher in A.")
         else:
-            self.contrast_preview_var.set(
-                f"Contrast: {t} vs {r}   →   log2FC > 0 = higher in \"{t}\"   |   "
-                f"log2FC < 0 = higher in \"{r}\" (reference)")
+            t, r = self.test_combo.currentText(), self.ref_combo.currentText()
+            if not t or not r:
+                txt = "Choose the test group and the reference group (after extracting the groups)."
+            elif t == r:
+                txt = "●  The test group and the reference group must be different."
+            else:
+                txt = (f'Contrast: {t} vs {r}   →   log2FC > 0 = higher in "{t}"   |   '
+                       f'log2FC < 0 = higher in "{r}" (reference)')
+        self.contrast_preview.setText(txt)
 
     def _swap_groups(self):
-        t, r = self.test_group_var.get(), self.ref_group_var.get()
-        self.test_group_var.set(r)
-        self.ref_group_var.set(t)
-
-    def _build_pca_tab(self, f):
-        top_bar = ttk.Frame(f)
-        top_bar.pack(fill=tk.X, padx=8, pady=(8, 0))
-        self._build_help_button(top_bar, "pca").pack(anchor="center", pady=(10, 5))
-
-        top = ttk.Frame(f)
-        top.pack(fill=tk.X, padx=8, pady=(4, 4))
-        cb_labels = ttk.Checkbutton(top, text="Show sample labels", variable=self.pca_show_labels)
-        cb_labels.pack(side=tk.LEFT)
-        add_tip(cb_labels, "Writes the ID of each sample next to its point in the chart.")
-
-        cb_ellipse = ttk.Checkbutton(top, text="Confidence ellipses per group",
-                                      variable=self.pca_show_ellipses)
-        cb_ellipse.pack(side=tk.LEFT, padx=(14, 0))
-        add_tip(cb_ellipse, "Draws an ellipse around the samples of each group (requires "
-                             "at least 3 samples per group): makes the separation between "
-                             "conditions visually clearer, widely used in PCA figures in papers.")
-
-        cb_cb = ttk.Checkbutton(top, text="Color-blind-friendly palette", variable=self.pca_colorblind)
-        cb_cb.pack(side=tk.LEFT, padx=(14, 0))
-        add_tip(cb_cb, "Uses the Okabe-Ito palette, readable even by people with a color "
-                       "vision deficiency (recommended for published figures).")
-
-        ttk.Label(top, text="  Custom title:").pack(side=tk.LEFT, padx=(16, 4))
-        title_entry = ttk.Entry(top, textvariable=self.pca_title_var, width=32)
-        title_entry.pack(side=tk.LEFT)
-        add_tip(title_entry, "Overrides the chart's default title.")
-        ttk.Button(top, text="Apply", style="Accent.TButton",
-                   command=self._draw_pca).pack(side=tk.LEFT, padx=12)
-
-        top2 = ttk.Frame(f)
-        top2.pack(fill=tk.X, padx=8, pady=(0, 4))
-        ttk.Label(top2, text="Color by:").pack(side=tk.LEFT)
-        self.pca_color_combo = ttk.Combobox(top2, textvariable=self.pca_color_col,
-                                            state="readonly", width=28,
-                                            values=[pcol.DEFAULT_COLUMN],
-                                            postcommand=self._refresh_pca_color_columns)
-        self.pca_color_combo.pack(side=tk.LEFT, padx=(4, 12))
-        self.pca_color_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_pca())
-        add_tip(self.pca_color_combo,
-                "Colors the PCA points by any column of the metadata file. Numeric "
-                "columns (e.g. age) get a continuous color scale with a color bar; "
-                "text columns (e.g. tumor stage) get one distinct color per group. "
-                "Missing values ('not available', empty...) are shown in grey.")
-        ttk.Label(top2, text="Type:").pack(side=tk.LEFT)
-        kind_combo = ttk.Combobox(top2, textvariable=self.pca_color_kind, state="readonly",
-                                  width=12, values=pcol.KIND_CHOICES)
-        kind_combo.pack(side=tk.LEFT, padx=(4, 12))
-        kind_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_pca())
-        add_tip(kind_combo, "'Auto' decides from the values. Force 'Categorical' for numeric "
-                            "codes that are really groups, or 'Numeric' for a continuous scale.")
-        ttk.Label(top2, text="Scale (numeric):").pack(side=tk.LEFT)
-        cmap_combo = ttk.Combobox(top2, textvariable=self.pca_cmap, state="readonly",
-                                  width=12, values=list(pcol.CMAPS.keys()))
-        cmap_combo.pack(side=tk.LEFT, padx=4)
-        cmap_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_pca())
-        add_tip(cmap_combo, "Color scale used for numeric columns (low → high).")
-
-        expl = ("PCA (Principal Component Analysis): each point is a sample. Samples "
-                "with a similar color/condition that are close together indicate "
-                "similar expression profiles. PC1 and PC2 show the percentage of "
-                "variance explained: the higher it is, the more that component "
-                "summarizes the dataset's variability. Use the toolbar's magnifying "
-                "glass to zoom, and the 'Manual annotations' bar to add arrows/boxes/"
-                "text before exporting the figure for publication.")
-        self.pca_panel = InteractivePlotPanel(f, expl, redraw_callback=self._draw_pca)
-        self.pca_panel.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-
-    def _build_contrast_bar(self, parent, kind: str):
-        """Contrast selector + direction label, shown at the top of every result tab.
-        All selectors share self.active_tag, so they stay in sync."""
-        bar = ttk.Frame(parent)
-        bar.pack(fill=tk.X, padx=8, pady=(4, 0))
-        ttk.Label(bar, text="Contrast:", font=FONT_BOLD).pack(side=tk.LEFT)
-        combo = ttk.Combobox(bar, textvariable=self.active_tag, state="readonly", width=34)
-        combo.pack(side=tk.LEFT, padx=6)
-        combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_all_views())
-        self._contrast_combos.append(combo)
-        var = tk.StringVar(value="")
-        self._direction_vars[kind] = var
-        ttk.Label(parent, textvariable=var, font=FONT_BOLD,
-                  foreground=PALETTE["accent"]).pack(anchor="w", padx=8, pady=(0, 4))
-        return combo
-
-    def _active_result(self):
-        if self.results is None:
-            return None
-        return self.results.per_contrast.get(self.active_tag.get())
-
-    def _dir_names(self, res):
-        hi = res.group_high if res is not None and res.group_high else "group 1 (log2FC>0)"
-        lo = res.group_low if res is not None and res.group_low else "group 2 (log2FC<0)"
-        return hi, lo
-
-    def _contrast_title(self, tag: str) -> str:
-        res = self.results.per_contrast.get(tag) if self.results else None
-        return res.label if res is not None else str(tag).replace("_", " ")
-
-    def _regulation_options(self, res):
-        hi, lo = self._dir_names(res)
-        return ["All", f"Higher in {hi} only", f"Higher in {lo} only", "Not significant only"]
-
-    def _direction_text(self, kind: str, res) -> str:
-        if res is None:
-            return ""
-        if not (res.group_high and res.group_low):
-            return "The direction of the comparison cannot be determined automatically for this contrast."
-        hi, lo = res.group_high, res.group_low
-        if kind == "gsea":
-            return (f"Contrast {hi} vs {lo}:  NES > 0 = pathway enriched among genes higher in \"{hi}\"   |   "
-                    f"NES < 0 = among genes higher in \"{lo}\" (reference)")
-        if kind == "ora":
-            return (f"Contrast {hi} vs {lo}:  UP = genes higher in \"{hi}\"   |   "
-                    f"DOWN = genes higher in \"{lo}\" (reference)")
-        return (f"Contrast {hi} vs {lo}:  log2FC > 0 = higher in \"{hi}\"   |   "
-                f"log2FC < 0 = higher in \"{lo}\" (reference)")
-
-    def _update_direction_labels(self):
-        res = self._active_result()
-        for kind, var in self._direction_vars.items():
-            var.set(self._direction_text(kind, res))
-        combo = getattr(self, "table_reg_combo", None)
-        if combo is not None and res is not None:
-            opts = self._regulation_options(res)
-            combo["values"] = opts
-            if self.table_regulation_filter.get() not in opts:
-                self.table_regulation_filter.set(opts[0])
-
-    def _build_volcano_tab(self, f):
-        top_bar = ttk.Frame(f)
-        top_bar.pack(fill=tk.X, padx=8, pady=(8, 0))
-        self._build_help_button(top_bar, "volcano").pack(anchor="center", pady=(10, 5))
-
-        self.volcano_contrast_combo = self._build_contrast_bar(f, "volcano")
-        ttk.Label(f, text="(after changing the cutoffs in the Setup tab, press 'Apply "
-                          "changes' below to update without rerunning R)",
-                  style="Muted.TLabel").pack(anchor="w", padx=8, pady=(0, 4))
-
-        controls = ttk.Frame(f)
-        controls.pack(fill=tk.X, padx=8, pady=(0, 4))
-        controls.columnconfigure(0, weight=1)
-        controls.columnconfigure(1, weight=1)
-
-        label_frame = ttk.LabelFrame(controls, text="Gene labels (for publication)")
-        label_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=4)
-
-        ttk.Label(label_frame, text="Mode:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        mode_combo = ttk.Combobox(label_frame, textvariable=self.volcano_label_mode_display, state="readonly",
-                                   width=26, values=self.LABEL_MODE_DISPLAY)
-        mode_combo.grid(row=0, column=1, columnspan=3, sticky="w", padx=6, pady=4)
-        add_tip(mode_combo, "Choose which genes to label with their name directly on the chart.")
-
-        ttk.Label(label_frame, text="Top N:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(label_frame, from_=1, to=200, textvariable=self.volcano_label_topn,
-                    width=6).grid(row=1, column=1, sticky="w", padx=6, pady=4)
-
-        ttk.Label(label_frame, text="Font size:").grid(row=1, column=2, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(label_frame, from_=6, to=20, textvariable=self.volcano_label_fontsize,
-                    width=6).grid(row=1, column=3, sticky="w", padx=6, pady=4)
-
-        ttk.Label(label_frame, text="Specific genes (comma-separated):").grid(
-            row=2, column=0, columnspan=2, sticky="w", padx=6, pady=4)
-        custom_entry = ttk.Entry(label_frame, textvariable=self.volcano_label_custom, width=34)
-        custom_entry.grid(row=3, column=0, columnspan=4, sticky="we", padx=6, pady=(0, 4))
-        add_tip(custom_entry, "Use this field with the 'Specific genes (list)' mode to label "
-                               "only the genes of interest to you, e.g.: TP53, MYC, EGFR")
-
-        leader_cb = ttk.Checkbutton(label_frame, text="Leader lines to label",
-                                     variable=self.volcano_leader_lines)
-        leader_cb.grid(row=4, column=0, columnspan=4, sticky="w", padx=6, pady=4)
-        add_tip(leader_cb, "Draws a thin line connecting the point to the label, useful "
-                            "when there are many labels close together.")
-
-        style_frame = ttk.LabelFrame(controls, text="Chart appearance")
-        style_frame.grid(row=0, column=1, sticky="nsew", pady=4)
-
-        ttk.Label(style_frame, text="Up color:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        self.volcano_up_swatch = tk.Button(
-            style_frame, width=2, bg=self.volcano_color_up.get(), relief="solid", bd=1, cursor="hand2",
-            command=lambda: self._pick_series_color(self.volcano_color_up, self.volcano_up_swatch))
-        self.volcano_up_swatch.grid(row=0, column=1, sticky="w", padx=4)
-
-        ttk.Label(style_frame, text="Down color:").grid(row=0, column=2, sticky="w", padx=6, pady=4)
-        self.volcano_down_swatch = tk.Button(
-            style_frame, width=2, bg=self.volcano_color_down.get(), relief="solid", bd=1, cursor="hand2",
-            command=lambda: self._pick_series_color(self.volcano_color_down, self.volcano_down_swatch))
-        self.volcano_down_swatch.grid(row=0, column=3, sticky="w", padx=4)
-
-        ttk.Label(style_frame, text="NS color:").grid(row=0, column=4, sticky="w", padx=6, pady=4)
-        self.volcano_ns_swatch = tk.Button(
-            style_frame, width=2, bg=self.volcano_color_ns.get(), relief="solid", bd=1, cursor="hand2",
-            command=lambda: self._pick_series_color(self.volcano_color_ns, self.volcano_ns_swatch))
-        self.volcano_ns_swatch.grid(row=0, column=5, sticky="w", padx=4)
-
-        ttk.Label(style_frame, text="Point size:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(style_frame, from_=4, to=80, textvariable=self.volcano_point_size,
-                    width=6).grid(row=1, column=1, sticky="w", padx=4)
-
-        ttk.Label(style_frame, text="Transparency:").grid(row=1, column=2, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(style_frame, from_=0.1, to=1.0, increment=0.05, textvariable=self.volcano_point_alpha,
-                    width=6).grid(row=1, column=3, sticky="w", padx=4)
-
-        ttk.Label(style_frame, text="Custom title:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(style_frame, textvariable=self.volcano_title_var, width=26).grid(
-            row=2, column=1, columnspan=5, sticky="we", padx=6, pady=4)
-
-        ttk.Button(controls, text="Apply changes", style="Accent.TButton",
-                   command=self._draw_volcano).grid(row=1, column=0, columnspan=2, pady=(6, 2))
-
-        expl = ("Volcano plot: each point is a gene. X axis = log2 Fold Change (how much "
-                "and in which direction expression changes); Y axis = -log10(padj) "
-                "(statistical significance, higher = more significant). Colors follow "
-                "the cutoffs set in the Setup tab, but you can customize them above. "
-                "Use the 'Gene labels' controls to show only the names you want in the "
-                "figure, and the 'Manual annotations' bar to add arrows/boxes/lines: "
-                "add them last, since they are cleared when the chart is regenerated.")
-        self.volcano_panel = InteractivePlotPanel(f, expl, redraw_callback=self._draw_volcano)
-        self.volcano_panel.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-
-    def _pick_series_color(self, var: tk.StringVar, button: tk.Button):
-        color = colorchooser.askcolor(color=var.get(), title="Choose color")[1]
-        if color:
-            var.set(color)
-            button.configure(bg=color)
-
-    def _build_table_tab(self, f):
-        top_bar = ttk.Frame(f)
-        top_bar.pack(fill=tk.X, padx=8, pady=(6, 0))
-        self._build_help_button(top_bar, "table").pack(anchor="center", pady=(10, 5))
-        self._build_contrast_bar(f, "table")
-
-        top = ttk.Frame(f)
-        top.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Label(top, text="Filter (search GeneID):").pack(side=tk.LEFT)
-        self.table_filter_var = tk.StringVar()
-        entry = ttk.Entry(top, textvariable=self.table_filter_var, width=25)
-        entry.pack(side=tk.LEFT, padx=6)
-        entry.bind("<KeyRelease>", lambda e: self._populate_gene_table())
-        add_tip(entry, "Type to filter the table in real time by gene name.")
-
-        reg_combo = self.table_reg_combo = ttk.Combobox(top, textvariable=self.table_regulation_filter, state="readonly",
-                                  width=22, values=self.REGULATION_FILTER_OPTIONS)
-        reg_combo.pack(side=tk.LEFT, padx=10)
-        reg_combo.bind("<<ComboboxSelected>>", lambda e: self._populate_gene_table())
-        add_tip(reg_combo, "Shows only genes with a specific regulation direction.")
-
-        ttk.Button(top, text="Export CSV...", command=self._export_gene_table).pack(side=tk.LEFT, padx=10)
-
-        self.table_count_lbl = ttk.Label(top, text="", style="Muted.TLabel")
-        self.table_count_lbl.pack(side=tk.RIGHT, padx=10)
-
-        table_container = ttk.Frame(f)
-        table_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-
-        columns = ("GeneID", "Regulation", "Significant", "log2FoldChange", "pvalue", "padj", "stat")
-        self.gene_tree = ttk.Treeview(table_container, columns=columns, show="headings", height=20)
-        for c in columns:
-            self.gene_tree.heading(c, text=c, command=lambda cc=c: self._sort_tree(self.gene_tree, cc, False))
-            self.gene_tree.column(c, width=190 if c == "Regulation" else 110, anchor="center")
-        self.gene_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.gene_tree.tag_configure("up", foreground=PALETTE["up"])
-        self.gene_tree.tag_configure("down", foreground=PALETTE["down"])
-        self.gene_tree.tag_configure("ns", foreground=PALETTE["muted"])
-
-        vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.gene_tree.yview)
-        self.gene_tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-    def _build_gsea_tab(self, f):
-        top_bar = ttk.Frame(f)
-        top_bar.pack(fill=tk.X, padx=8, pady=(6, 0))
-        self._build_help_button(top_bar, "gsea").pack(anchor="center", pady=(10, 5))
-        self._build_contrast_bar(f, "gsea")
-
-        top = ttk.Frame(f)
-        top.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Label(top, text="Top N pathways:").pack(side=tk.LEFT)
-        ttk.Spinbox(top, from_=3, to=100, increment=1, textvariable=self.top_n_pathways,
-                    width=6, command=self._draw_gsea).pack(side=tk.LEFT, padx=6)
-
-        asterisk_cb = ttk.Checkbutton(top, text="Significance asterisks",
-                                       variable=self.gsea_show_asterisks, command=self._draw_gsea)
-        asterisk_cb.pack(side=tk.LEFT, padx=(14, 0))
-        add_tip(asterisk_cb, "Adds * (padj<0.05), ** (padj<0.01), *** (padj<0.001) next to "
-                              "each bar, as in the figures of many publications.")
-
-        ttk.Label(top, text="  Custom title:").pack(side=tk.LEFT, padx=(10, 4))
-        ttk.Entry(top, textvariable=self.gsea_title_var, width=26).pack(side=tk.LEFT)
-        ttk.Button(top, text="Apply", style="Accent.TButton", command=self._draw_gsea).pack(
-            side=tk.LEFT, padx=10)
-        ttk.Button(top, text="Export pathway table CSV...",
-                   command=self._export_gsea_table).pack(side=tk.LEFT, padx=10)
-
-        paned = ttk.Panedwindow(f, orient=tk.VERTICAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-
-        expl = ("GSEA (Gene Set Enrichment Analysis): shows the most modulated "
-                "biological pathways. NES (Normalized Enrichment Score) positive = "
-                "pathway enriched among genes higher in the FIRST group of the contrast "
-                "(\"A\" in \"A vs B\"), negative = among genes higher in the reference "
-                "group (B). Only "
-                "pathways with padj below the chosen threshold (or the top N by |NES| "
-                "if none is significant) are shown. Use the 'Manual annotations' bar "
-                "to highlight pathways of interest before exporting the figure.")
-        self.gsea_panel = InteractivePlotPanel(paned, expl, figsize=(6.4, 4.0), redraw_callback=self._draw_gsea)
-        paned.add(self.gsea_panel, weight=2)
-
-        table_frame = ttk.Frame(paned)
-        columns_g = ("pathway", "NES", "padj", "size")
-        self.gsea_tree = ttk.Treeview(table_frame, columns=columns_g, show="headings", height=8)
-        for c in columns_g:
-            self.gsea_tree.heading(c, text=c, command=lambda cc=c: self._sort_tree(self.gsea_tree, cc, False))
-            self.gsea_tree.column(c, width=120, anchor="center")
-        self.gsea_tree.pack(fill=tk.BOTH, expand=True)
-        paned.add(table_frame, weight=1)
-
-    def _build_ora_tab(self, f):
-        top_bar = ttk.Frame(f)
-        top_bar.pack(fill=tk.X, padx=8, pady=(6, 0))
-        self._build_help_button(top_bar, "ora").pack(anchor="center", pady=(10, 5))
-        self._build_contrast_bar(f, "ora")
-
-        top = ttk.Frame(f)
-        top.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Label(top, text="Top N pathways:").pack(side=tk.LEFT)
-        ttk.Spinbox(top, from_=3, to=100, increment=1, textvariable=self.top_n_ora,
-                    width=6, command=self._draw_ora).pack(side=tk.LEFT, padx=6)
-
-        ttk.Label(top, text="  Chart type:").pack(side=tk.LEFT, padx=(10, 4))
-        type_combo = ttk.Combobox(top, textvariable=self.ora_chart_type, values=["Bar", "Dot"],
-                                   state="readonly", width=6)
-        type_combo.pack(side=tk.LEFT)
-        type_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_ora())
-        add_tip(type_combo, "Bar: significance as bar length (-log10 padj), with k/K, fold enrichment "
-                             "and padj next to each bar. Dot: Gene Ratio on X, size = genes, color = padj.")
-
-        ttk.Label(top, text="  Custom title:").pack(side=tk.LEFT, padx=(10, 4))
-        ttk.Entry(top, textvariable=self.ora_title_var, width=26).pack(side=tk.LEFT)
-        ttk.Button(top, text="Apply", style="Accent.TButton", command=self._draw_ora).pack(
-            side=tk.LEFT, padx=10)
-        ttk.Button(top, text="Export ORA table CSV...",
-                   command=self._export_ora_table).pack(side=tk.LEFT, padx=10)
-
-        paned = ttk.Panedwindow(f, orient=tk.VERTICAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-
-        expl = ("ORA (Over-Representation Analysis): tests whether the significant genes "
-                "(padj and log2FC cutoffs from the Setup tab) are over-represented in each "
-                "pathway, against the background of all genes tested in the DEA. k/K = genes "
-                "in the list / genes of the pathway in the universe; FE = fold enrichment. "
-                "Bar colour shows the direction of the genes supporting the pathway (UP / "
-                "DOWN if at least 80% of them agree, otherwise MIXED). Only pathways with "
-                "padj below the chosen threshold (or the top N by p-value if none is "
-                "significant) are shown.")
-        self.ora_panel = InteractivePlotPanel(paned, expl, figsize=(6.4, 4.0), redraw_callback=self._draw_ora)
-        paned.add(self.ora_panel, weight=2)
-
-        table_frame = ttk.Frame(paned)
-        columns_o = ("pathway", "count", "k_K", "FE", "padj", "direction", "N_UP", "N_DOWN")
-        headings_o = {"pathway": "pathway", "count": "genes", "k_K": "k/K", "FE": "FE",
-                      "padj": "padj", "direction": "direction", "N_UP": "N_UP", "N_DOWN": "N_DOWN"}
-        self.ora_tree = ttk.Treeview(table_frame, columns=columns_o, show="headings", height=8)
-        for c in columns_o:
-            self.ora_tree.heading(c, text=headings_o[c],
-                                   command=lambda cc=c: self._sort_tree(self.ora_tree, cc, False))
-            self.ora_tree.column(c, width=120 if c != "pathway" else 260, anchor="center")
-        self.ora_tree.pack(fill=tk.BOTH, expand=True)
-        paned.add(table_frame, weight=1)
-
-    # ---- Gene counts tab ------------------------------------------------------
-    def _build_genes_tab(self, f):
-        top_bar = ttk.Frame(f)
-        top_bar.pack(fill=tk.X, padx=8, pady=(8, 0))
-        self._build_help_button(top_bar, "genes").pack(anchor="center", pady=(10, 5))
-
-        row1 = ttk.Frame(f)
-        row1.pack(fill=tk.X, padx=8, pady=(4, 4))
-        ttk.Label(row1, text="Gene:").pack(side=tk.LEFT)
-        gene_entry = ttk.Entry(row1, textvariable=self.gene_plot_gene, width=16)
-        gene_entry.pack(side=tk.LEFT, padx=(4, 12))
-        gene_entry.bind("<Return>", lambda e: self._draw_gene_plot())
-        add_tip(gene_entry, "Gene symbol as it appears in the analysis (e.g. TP53, Trp53). Upper/lower case "
-                            "is not important. Genes removed by the low-counts filter are not available.")
-        ttk.Label(row1, text="Metadata (Y axis):").pack(side=tk.LEFT)
-        self.gene_var_combo = ttk.Combobox(row1, textvariable=self.gene_plot_var, state="readonly", width=22,
-                                           values=[], postcommand=self._refresh_gene_plot_columns)
-        self.gene_var_combo.pack(side=tk.LEFT, padx=(4, 12))
-        self.gene_var_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_gene_plot())
-        add_tip(self.gene_var_combo, "Metadata column to compare with the expression. Numeric columns (age...) "
-                                     "give a dot plot with Spearman correlation; text columns (sex, stage...) "
-                                     "give a box plot per group with Mann-Whitney / Kruskal-Wallis.")
-        ttk.Label(row1, text="Type:").pack(side=tk.LEFT)
-        kind_combo = ttk.Combobox(row1, textvariable=self.gene_plot_kind, state="readonly", width=12,
-                                  values=pcol.KIND_CHOICES)
-        kind_combo.pack(side=tk.LEFT, padx=(4, 12))
-        kind_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_gene_plot())
-        add_tip(kind_combo, "'Auto' decides from the values. Force 'Categorical' for numeric codes that are "
-                            "really groups, or 'Numeric' for a continuous variable.")
-        ttk.Button(row1, text="Plot", style="Accent.TButton", command=self._draw_gene_plot).pack(side=tk.LEFT, padx=8)
-
-        row2 = ttk.Frame(f)
-        row2.pack(fill=tk.X, padx=8, pady=(0, 4))
-        ttk.Label(row2, text="Color points by:").pack(side=tk.LEFT)
-        self.gene_color_combo = ttk.Combobox(row2, textvariable=self.gene_plot_color_col, state="readonly",
-                                             width=24, values=[gplot.NO_COLOR],
-                                             postcommand=self._refresh_gene_plot_columns)
-        self.gene_color_combo.pack(side=tk.LEFT, padx=(4, 12))
-        self.gene_color_combo.bind("<<ComboboxSelected>>", lambda e: self._draw_gene_plot())
-        add_tip(self.gene_color_combo,
-                "Colors the points (one point = one sample) by any column of the metadata file. Numeric columns "
-                "get a continuous color scale with a color bar; text columns get one distinct color per group. "
-                "Missing values ('not available', empty...) are grey.")
-        ttk.Label(row2, text="Type:").pack(side=tk.LEFT)
-        ckind = ttk.Combobox(row2, textvariable=self.gene_plot_color_kind, state="readonly", width=12,
-                             values=pcol.KIND_CHOICES)
-        ckind.pack(side=tk.LEFT, padx=(4, 12))
-        ckind.bind("<<ComboboxSelected>>", lambda e: self._draw_gene_plot())
-        ttk.Label(row2, text="Scale (numeric):").pack(side=tk.LEFT)
-        ccmap = ttk.Combobox(row2, textvariable=self.gene_plot_cmap, state="readonly", width=12,
-                             values=list(pcol.CMAPS.keys()))
-        ccmap.pack(side=tk.LEFT, padx=(4, 12))
-        ccmap.bind("<<ComboboxSelected>>", lambda e: self._draw_gene_plot())
-        cb_cb = ttk.Checkbutton(row2, text="Color-blind-friendly palette", variable=self.gene_plot_colorblind,
-                                command=self._draw_gene_plot)
-        cb_cb.pack(side=tk.LEFT, padx=(4, 0))
-
-        row3 = ttk.Frame(f)
-        row3.pack(fill=tk.X, padx=8, pady=(0, 4))
-        ttk.Checkbutton(row3, text="Show sample labels", variable=self.gene_plot_labels,
-                        command=self._draw_gene_plot).pack(side=tk.LEFT)
-        trend_cb = ttk.Checkbutton(row3, text="Linear trend line (numeric metadata)", variable=self.gene_plot_trend,
-                                   command=self._draw_gene_plot)
-        trend_cb.pack(side=tk.LEFT, padx=(14, 0))
-        ttk.Label(row3, text="  Custom title:").pack(side=tk.LEFT, padx=(16, 4))
-        ttk.Entry(row3, textvariable=self.gene_plot_title_var, width=26).pack(side=tk.LEFT)
-        ttk.Button(row3, text="Apply", style="Accent.TButton", command=self._draw_gene_plot).pack(side=tk.LEFT, padx=10)
-        ttk.Button(row3, text="Export plot data CSV...", command=self._export_gene_plot_data).pack(side=tk.LEFT, padx=6)
-
-        self.gene_msg_var = tk.StringVar(value="Run an analysis first, then type a gene and press 'Plot'.")
-        ttk.Label(f, textvariable=self.gene_msg_var, style="Muted.TLabel", wraplength=900).pack(
-            anchor="w", padx=10, pady=(0, 2))
-
-        expl = ("Gene counts: each point is a SAMPLE; X axis = expression of the chosen gene in that sample "
-                "(log2 of the size-factor-normalized counts, the scale is written on the axis). With a numeric "
-                "metadata column (e.g. age) the chart is a dot plot with Spearman's rho; with a text column "
-                "(e.g. sex) it is a box plot per group with Mann-Whitney (2 groups) or Kruskal-Wallis (>2). "
-                "'Color points by' paints the points with any other metadata column. The normalized values are "
-                "exploratory only: the differential expression statistics come from the raw counts model.")
-        self.gene_panel = InteractivePlotPanel(f, expl, redraw_callback=self._draw_gene_plot)
-        self.gene_panel.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-        self._gene_plot_frame = None
-
-    def _read_meta_cached(self, path: str) -> pd.DataFrame:
-        mtime = os.path.getmtime(path)
-        if self._meta_cache[0] != path or self._meta_cache[1] != mtime:
-            self._meta_cache = (path, mtime, pcol.read_metadata(path))
-        return self._meta_cache[2]
-
-    def _refresh_gene_plot_columns(self):
-        """Fills the metadata-column lists of the Gene counts tab."""
-        vcombo = getattr(self, "gene_var_combo", None)
-        ccombo = getattr(self, "gene_color_combo", None)
-        if vcombo is None or ccombo is None:
-            return
-        path = self.metadata_path.get().strip()
-        cols = []
-        if path and os.path.isfile(path):
-            try:
-                cols = list(self._read_meta_cached(path).columns)
-                sname = pcol.resolve_column(self._read_meta_cached(path), self._parse_col(self.sample_col.get()))
-                cols_y = [c for c in cols if c != sname]
-            except Exception:
-                cols, cols_y = [], []
-        else:
-            cols_y = []
-        vcombo["values"] = cols_y
-        ccombo["values"] = [gplot.NO_COLOR] + cols
-        if self.gene_plot_var.get() not in cols_y:
-            self.gene_plot_var.set(cols_y[0] if cols_y else "")
-        if self.gene_plot_color_col.get() not in ccombo["values"]:
-            self.gene_plot_color_col.set(gplot.NO_COLOR)
-
-    def _draw_gene_plot(self):
-        panel = getattr(self, "gene_panel", None)
-        if panel is None:
-            return
-        if self._gene_colorbar is not None:
-            try:
-                self._gene_colorbar.remove()
-            except Exception:
-                pass
-            self._gene_colorbar = None
-        panel.clear()
-        self._gene_plot_frame = None
-        if self.results is None:
-            panel.redraw()
-            return
-        nm = self.results.norm_matrix
-        if nm is None:
-            self.gene_msg_var.set("The normalized expression matrix is not available for this run "
-                                  "(see the Log tab for the reason).")
-            panel.redraw()
-            return
-        gene = self.gene_plot_gene.get().strip()
-        if not gene:
-            self.gene_msg_var.set("Type a gene symbol and press 'Plot'.")
-            panel.redraw()
-            return
-        var = self.gene_plot_var.get()
-        if not var:
-            self.gene_msg_var.set("Select a metadata column for the Y axis.")
-            panel.redraw()
-            return
-
-        meta_path, sample_col = self._pca_meta_source()
-        try:
-            meta = self._read_meta_cached(meta_path)
-            frame = gplot.build_frame(nm, meta, sample_col, gene, var, self.gene_plot_kind.get())
-        except Exception as e:
-            self.gene_msg_var.set(f"⚠ {e}")
-            panel.redraw()
-            return
-
-        try:
-            spec = gplot.color_spec_for(frame, meta, sample_col, self.gene_plot_color_col.get(),
-                                        self.gene_plot_color_kind.get(), self.gene_plot_colorblind.get(),
-                                        self.gene_plot_cmap.get())
-        except Exception as e:
-            messagebox.showwarning("Gene counts colors",
-                                   f"Cannot color by '{self.gene_plot_color_col.get()}':\n{e}\n\n"
-                                   "Falling back to a single color.")
-            self.gene_plot_color_col.set(gplot.NO_COLOR)
-            spec = gplot.color_spec_for(frame, meta, sample_col, gplot.NO_COLOR)
-
-        artists, stats, extra = gplot.draw_gene_plot(
-            panel.ax, frame, spec, self.results.norm_label, size=60, alpha=0.85,
-            title=self.gene_plot_title_var.get().strip() or None,
-            show_sample_labels=self.gene_plot_labels.get(), show_trend=self.gene_plot_trend.get())
-        if panel.legend_on.get():
-            self._gene_colorbar = gplot.add_legend_or_colorbar(panel.figure, panel.ax, spec, extra,
-                                                               legend_fn=panel.place_legend)
-        panel.apply_common_style()
-        self._gene_plot_frame = (frame, stats)
-
-        n_unmatched = spec.get("n_unmatched", 0)
-        n_missing = spec.get("n_missing", 0)
-        note = f"{frame['gene']} vs {var}: {len(frame['df'])} samples plotted"
-        if not spec.get("uniform"):
-            note += f" | colored by '{spec['column']}'"
-            if n_missing:
-                note += f" ({n_missing} without a value, grey)"
-        if n_unmatched:
-            note += f" | ⚠ {n_unmatched} sample IDs not found in the metadata"
-        self.gene_msg_var.set(note)
-
-        if HAS_MPLCURSORS and artists:
-            all_sc = [a for a, _ in artists]
-            all_sub = [sdf for _, sdf in artists]
-            col_name = spec["column"]
-
-            def fmt(idx_tuple):
-                artist_idx, point_idx = idx_tuple
-                row = all_sub[artist_idx].iloc[point_idx]
-                txt = f"{row.get('SampleID', '?')}\nexpr: {row['expr']:.2f} | {var}: {row['val']}"
-                if not spec.get("uniform"):
-                    cv = row.get("_val")
-                    txt += f"\n{col_name}: {'n.a.' if pd.isna(cv) else cv}"
-                return txt
-            panel.enable_hover(all_sc, lambda idx: fmt(idx) if isinstance(idx, tuple) else str(idx))
-        panel.redraw()
-
-    def _export_gene_plot_data(self):
-        if not getattr(self, "_gene_plot_frame", None):
-            messagebox.showinfo("Info", "Draw a gene plot first.")
-            return
-        frame, stats = self._gene_plot_frame
-        path = filedialog.asksaveasfilename(
-            title="Save plot data", defaultextension=".csv", initialfile=f"{frame['gene']}_vs_{frame['variable']}.csv",
-            filetypes=[("CSV", "*.csv")])
-        if not path:
-            return
-        out = frame["df"].rename(columns={"expr": f"expression ({self.results.norm_label})",
-                                          "val": frame["variable"]})
-        try:
-            out.to_csv(path, index=False)
-        except OSError as e:
-            messagebox.showerror("Error", f"Unable to save the file: {e}")
-            return
-        self.status_var.set(f"Plot data saved to: {path}")
-
-    def _build_log_tab(self, f):
-        top_bar = ttk.Frame(f)
-        top_bar.pack(fill=tk.X, padx=8, pady=(8, 0))
-        self._build_help_button(top_bar, "log").pack(anchor="center", pady=(10, 5))
-
-        top = ttk.Frame(f)
-        top.pack(fill=tk.X, padx=8, pady=(4, 4))
-        ttk.Button(top, text="Clear log", style="Danger.TButton",
-                   command=self._clear_log).pack(side=tk.LEFT)
-        ttk.Button(top, text="Save log to file...", command=self._save_log).pack(side=tk.LEFT, padx=8)
-
-        self.log_text = scrolledtext.ScrolledText(f, wrap="word", state="disabled",
-                                                    font=FONT_MONO, bg="white", fg=PALETTE["text"],
-                                                    height=28)
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-    def _clear_log(self):
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
-
-    def _save_log(self):
-        path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text", "*.txt")])
-        if path:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(self.log_text.get("1.0", "end"))
-            self.status_var.set(f"Log saved to: {path}")
-
-    def _log(self, msg: str):
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", msg + "\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
-
-    def _pick_counts(self):
-        path = filedialog.askopenfilename(title="Select the counts file",
-                                           filetypes=[("Data", "*.csv *.tsv *.txt *.xlsx *.xls *.json"),
-                                                      ("All files", "*.*")])
-        if path:
-            self.counts_path.set(path)
-
-    def _pick_metadata(self):
-        path = filedialog.askopenfilename(title="Select the metadata file",
-                                           filetypes=[("Data", "*.csv *.tsv *.txt *.xlsx *.xls *.json"),
-                                                      ("All files", "*.*")])
-        if path:
-            self.metadata_path.set(path)
+        t, r = self.test_combo.currentText(), self.ref_combo.currentText()
+        self.test_combo.setCurrentText(r)
+        self.ref_combo.setCurrentText(t)
 
     def _extract_groups(self):
-        if not self.metadata_path.get():
-            messagebox.showerror("Error", "Please select the metadata file first.")
+        if not self.metadata_path:
+            QMessageBox.critical(self, "Error", "Please select the metadata file first.")
             return
-        self.status_var.set("Extracting groups...")
-        self.progress.start(10)
+        self.statusBar().showMessage("Extracting groups…")
+        self._busy(True)
+        meta, sc, cc = self.metadata_path, self._parse_col(self.sample_col.text()), self._parse_col(
+            self.condition_col.text())
+        w = Worker(lambda cb: engine.list_groups(meta, sample_col=sc, condition_col=cc, log_callback=cb),
+                   "Group extraction failed", self)
+        w.log.connect(self._log)
+        w.done.connect(self._on_groups_ready)
+        w.failed.connect(self._on_error)
+        w.finished.connect(lambda: (self._busy(False), self.statusBar().showMessage("Ready.")))
+        self._start(w)
 
-        def task():
-            try:
-                data = engine.list_groups(
-                    self.metadata_path.get(),
-                    sample_col=self._parse_col(self.sample_col.get()),
-                    condition_col=self._parse_col(self.condition_col.get()),
-                    log_callback=self._threadsafe_log,
-                )
-                self.root.after(0, lambda: self._on_groups_ready(data))
-            except engine.RPipelineError as e:
-                self.root.after(0, lambda e=e: self._on_error("Group extraction failed", e))
-            finally:
-                self.root.after(0, lambda: (self.progress.stop(), self.status_var.set("Ready.")))
-
-        threading.Thread(target=task, daemon=True).start()
-
-    SETTINGS_FORMAT = "de-gui-settings"
-    SETTINGS_VERSION = 1
-
-    def _species_value(self) -> str:
-        """Species name passed to R (e.g. 'Mus musculus') from the label shown in the combo box."""
-        return engine.SPECIES_CHOICES.get(self.species_display.get(), engine.DEFAULT_SPECIES)
+    def _on_groups_ready(self, data: dict):
+        self.available_groups = data.get("groups", [])
+        counts = data.get("counts", {})
+        for c in (self.test_combo, self.ref_combo):
+            c.blockSignals(True)
+            c.clear()
+            c.addItems(self.available_groups)
+            c.setCurrentIndex(-1)
+            c.blockSignals(False)
+        self.groups_info.setText("Samples per group:  " + "   ·   ".join(
+            f"{g} (n={counts.get(g, '?')})" for g in self.available_groups))
+        pending, self._pending_group_restore = self._pending_group_restore, None
+        if pending:
+            t, r = pending
+            missing = [g for g in (t, r) if g and g not in self.available_groups]
+            if missing:
+                QMessageBox.warning(self, "Settings", "These groups from the settings file are not in the "
+                                                      "metadata: " + ", ".join(missing))
+            else:
+                self.test_combo.setCurrentText(t or "")
+                self.ref_combo.setCurrentText(r or "")
+        self._update_contrast_preview()
+        self._log(f">>> Groups found: {', '.join(self.available_groups)}")
+        self.statusBar().showMessage(f"{len(self.available_groups)} groups found.")
+        if self.available_groups:
+            self.chip_groups.set_state("ok", f"●  {len(self.available_groups)} groups extracted")
+        else:
+            self.chip_groups.set_state("err", "●  No groups found in metadata")
 
     def _collect_settings(self) -> dict:
-        """Everything that defines the analysis (not the plot cosmetics)."""
-        t, r = self.test_group_var.get(), self.ref_group_var.get()
-        gene_list = [g.strip() for g in re.split(r"[,;\n]+", self.gene_list_var.get()) if g.strip()]
         return {
-            "counts_path": self.counts_path.get(),
-            "metadata_path": self.metadata_path.get(),
-            "method": self.method.get(),
-            "gene_col": self.gene_col.get(),
-            "sample_col": self.sample_col.get(),
-            "condition_col": self.condition_col.get(),
-            "pairwise_all": bool(self.pairwise_all.get()),
-            "test_group": t,
-            "ref_group": r,
-            "gene_list": gene_list,
-            "species": self._species_value(),
-            "padj_cutoff": self.padj_cutoff.get(),
-            "lfc_cutoff": self.lfc_cutoff.get(),
-            "min_counts": self.min_counts_var.get(),
-            "gsea_category": self.gsea_category.get(),
-            "gsea_subcategory": self.gsea_subcategory.get(),
-            "run_ora": bool(self.run_ora.get()),
-            "ora_direction": self.ORA_DIRECTION_MAP.get(self.ora_direction_display.get(), "all"),
-            "top_n_pathways": self.top_n_pathways.get(),
-            "top_n_ora": self.top_n_ora.get(),
-        }
+            "counts_path": self.counts_path, "metadata_path": self.metadata_path, "method": self._method(),
+            "gene_col": self.gene_col.text(), "sample_col": self.sample_col.text(),
+            "condition_col": self.condition_col.text(), "pairwise_all": self.pairwise.isChecked(),
+            "test_group": self.test_combo.currentText(), "ref_group": self.ref_combo.currentText(),
+            "gene_list": self._gene_list(), "species": self._species_value(),
+            "padj_cutoff": self.padj_cutoff.value(), "lfc_cutoff": self.lfc_cutoff.value(),
+            "min_counts": self.min_counts.value(), "gsea_category": self.gsea_category.currentText(),
+            "gsea_subcategory": self.gsea_subcategory.text(), "run_ora": self.run_ora.isChecked(),
+            "ora_direction": self.ORA_DIRECTION_MAP.get(self.ora_dir.currentText(), "all"),
+            "top_n_pathways": self.gsea_topn.value(), "top_n_ora": self.ora_topn.value(),}
 
     def _save_settings(self):
-        path = filedialog.asksaveasfilename(
-            title="Save analysis settings", defaultextension=".json",
-            filetypes=[("JSON settings", "*.json")], initialfile="analysis_settings.json")
+        path, _ = QFileDialog.getSaveFileName(self, "Save analysis settings", "analysis_settings.json",
+                                              "JSON settings (*.json)")
         if not path:
             return
-        payload = {
-            "format": self.SETTINGS_FORMAT,
-            "version": self.SETTINGS_VERSION,
-            "saved": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "settings": self._collect_settings(),
-        }
+        payload = {"format": self.SETTINGS_FORMAT, "version": self.SETTINGS_VERSION,
+                   "saved": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   "settings": self._collect_settings()}
         try:
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2, ensure_ascii=False)
         except OSError as e:
-            messagebox.showerror("Error", f"Unable to save the settings: {e}")
+            QMessageBox.critical(self, "Error", f"Unable to save the settings: {e}")
             return
         self._log(f">>> Settings saved to {path}")
-        self.status_var.set("Settings saved.")
+        self.notify("Settings saved")
 
     def _load_settings(self):
-        path = filedialog.askopenfilename(
-            title="Load analysis settings",
-            filetypes=[("JSON settings", "*.json"), ("All files", "*.*")])
+        path, _ = QFileDialog.getOpenFileName(self, "Load analysis settings", "",
+                                              "JSON settings (*.json);;All files (*)")
         if not path:
             return
         try:
@@ -2442,250 +790,241 @@ class DEAApp(ttk.Frame):
             if not isinstance(s, dict):
                 raise ValueError("invalid 'settings' section.")
         except (OSError, ValueError, KeyError, TypeError) as e:
-            messagebox.showerror("Error", f"Unable to load the settings: {e}")
+            QMessageBox.critical(self, "Error", f"Unable to load the settings: {e}")
             return
 
-        warnings = []
+        warnings: list[str] = []
 
-        def put(var, key, cast=None):
+        def put(setter, key, cast=None):
             if key not in s or s[key] is None:
                 return
             try:
-                var.set(cast(s[key]) if cast else s[key])
-            except (ValueError, TypeError, tk.TclError):
+                setter(cast(s[key]) if cast else s[key])
+            except (ValueError, TypeError):
                 warnings.append(f"invalid value for '{key}' (ignored)")
 
-        put(self.counts_path, "counts_path", str)
-        put(self.metadata_path, "metadata_path", str)
-        put(self.method, "method", str)
-        sp_inv = {v: k for k, v in engine.SPECIES_CHOICES.items()}
-        if s.get("species") in sp_inv:
-            self.species_display.set(sp_inv[s["species"]])
-        put(self.gene_col, "gene_col", str)
-        put(self.sample_col, "sample_col", str)
-        put(self.condition_col, "condition_col", str)
-        put(self.pairwise_all, "pairwise_all", bool)
-        put(self.padj_cutoff, "padj_cutoff", float)
-        put(self.lfc_cutoff, "lfc_cutoff", float)
-        put(self.min_counts_var, "min_counts", int)
-        put(self.gsea_category, "gsea_category", str)
-        put(self.gsea_subcategory, "gsea_subcategory", str)
-        put(self.run_ora, "run_ora", bool)
-        put(self.top_n_pathways, "top_n_pathways", int)
-        put(self.top_n_ora, "top_n_ora", int)
-        self.gene_list_var.set(", ".join(str(g) for g in (s.get("gene_list") or [])))
+        put(self.counts_dz.set_path, "counts_path", str)
+        put(self.metadata_dz.set_path, "metadata_path", str)
+        (self.rb_micro if s.get("method") == "Microarray" else self.rb_rna).setChecked(True)
+        inv_sp = {v: k for k, v in engine.SPECIES_CHOICES.items()}
+        if s.get("species") in inv_sp:
+            self.species.setCurrentText(inv_sp[s["species"]])
+        put(self.gene_col.setText, "gene_col", str)
+        put(self.sample_col.setText, "sample_col", str)
+        put(self.condition_col.setText, "condition_col", str)
+        put(self.pairwise.setChecked, "pairwise_all", bool)
+        put(self.padj_cutoff.setValue, "padj_cutoff", float)
+        put(self.lfc_cutoff.setValue, "lfc_cutoff", float)
+        put(self.min_counts.setValue, "min_counts", int)
+        put(self.gsea_category.setCurrentText, "gsea_category", str)
+        put(self.gsea_subcategory.setText, "gsea_subcategory", str)
+        put(self.run_ora.setChecked, "run_ora", bool)
+        put(self.gsea_topn.setValue, "top_n_pathways", int)
+        put(self.ora_topn.setValue, "top_n_ora", int)
+        self.gene_list.setText(", ".join(str(g) for g in (s.get("gene_list") or [])))
         inv = {v: k for k, v in self.ORA_DIRECTION_MAP.items()}
-        self.ora_direction_display.set(inv.get(s.get("ora_direction", "all"), self.ORA_DIRECTION_DISPLAY[0]))
+        self.ora_dir.setCurrentText(inv.get(s.get("ora_direction", "all"), self.ORA_DIRECTION_DISPLAY[0]))
 
-        # Groups: they can only be selected once they have been extracted from the metadata.
-        for child in self.groups_container.winfo_children():
-            child.destroy()
+        for c in (self.test_combo, self.ref_combo):
+            c.clear()
         self.available_groups = []
-        self.test_group_var.set("")
-        self.ref_group_var.set("")
         self._pending_group_restore = None
         for label, key in (("counts file", "counts_path"), ("metadata file", "metadata_path")):
             p = s.get(key)
             if p and not os.path.isfile(p):
                 warnings.append(f"the {label} was not found: {p}")
-        meta = self.metadata_path.get()
+        meta = self.metadata_path
         if meta and os.path.isfile(meta):
             if s.get("test_group") or s.get("ref_group"):
                 self._pending_group_restore = (s.get("test_group", ""), s.get("ref_group", ""))
             self._extract_groups()
         else:
-            warnings.append("groups were not restored (metadata file unavailable): "
-                            "select the file and press 'Extract groups from metadata'.")
-
+            warnings.append("groups were not restored (metadata file unavailable): select the file and press "
+                            "'Extract groups from metadata'.")
         self._validate_setup()
         self._update_contrast_preview()
         self._log(f">>> Settings loaded from {path}")
-        self.status_var.set("Settings loaded.")
+        self.notify("Settings loaded")
         if warnings:
-            messagebox.showwarning("Settings loaded with warnings", "\n".join("- " + w for w in warnings))
+            QMessageBox.warning(self, "Settings loaded with warnings", "\n".join("- " + w for w in warnings))
 
-    def _threadsafe_log(self, line: str):
-        self.root.after(0, lambda: self._log(line))
+    def _busy(self, on: bool):
+        if on:
+            self.progress.setRange(0, 0)
+        else:
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
 
-    def _on_groups_ready(self, data: dict):
-        self.available_groups = data.get("groups", [])
-        for child in self.groups_container.winfo_children():
-            child.destroy()
-        self.test_group_var.set("")
-        self.ref_group_var.set("")
-        counts = data.get("counts", {})
-        gc = self.groups_container
-        ttk.Label(gc, text="Test group (numerator):").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
-        self.test_combo = ttk.Combobox(gc, textvariable=self.test_group_var, values=self.available_groups,
-                                        state="readonly", width=30)
-        self.test_combo.grid(row=0, column=1, sticky="w", pady=2)
-        ttk.Label(gc, text="Reference group (denominator):").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
-        self.ref_combo = ttk.Combobox(gc, textvariable=self.ref_group_var, values=self.available_groups,
-                                       state="readonly", width=30)
-        self.ref_combo.grid(row=1, column=1, sticky="w", pady=2)
-        self.swap_btn = ttk.Button(gc, text="⇄ Swap", command=self._swap_groups)
-        self.swap_btn.grid(row=0, column=2, rowspan=2, padx=12)
-        add_tip(self.test_combo, "log2FC > 0 (and positive NES in GSEA) means HIGHER in this group.")
-        add_tip(self.ref_combo, "The baseline: the group the test group is compared against "
-                                "(denominator of the fold change).")
-        ttk.Label(gc, textvariable=self.contrast_preview_var, font=FONT_BOLD,
-                  foreground=PALETTE["accent"]).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 2))
-        ttk.Label(gc, text="Samples per group: " + ", ".join(
-                  f"{g} (n={counts.get(g, '?')})" for g in self.available_groups),
-                  style="Muted.TLabel").grid(row=3, column=0, columnspan=3, sticky="w")
-        self._toggle_pairwise()
-        pending = getattr(self, "_pending_group_restore", None)
-        self._pending_group_restore = None
-        if pending:
-            t, r = pending
-            missing = [g for g in (t, r) if g and g not in self.available_groups]
-            if missing:
-                messagebox.showwarning(
-                    "Settings", "These groups from the settings file are not in the metadata: "
-                                + ", ".join(missing))
-            else:
-                self.test_group_var.set(t or "")
-                self.ref_group_var.set(r or "")
-        self._log(f">>> Groups found: {', '.join(self.available_groups)}")
-        self.status_var.set(f"{len(self.available_groups)} groups found.")
-        if hasattr(self, "chk_groups_lbl"):
-            if self.available_groups:
-                self.chk_groups_lbl.configure(
-                    text=f"✓ {len(self.available_groups)} groups extracted: {', '.join(self.available_groups)}",
-                    style="Ok.TLabel")
-            else:
-                self.chk_groups_lbl.configure(text="✗ No groups found in metadata", style="Err.TLabel")
-
-    def _on_error(self, title: str, err: Exception):
-        self._log(f"[ERROR] {title}: {err}")
-        messagebox.showerror(title, str(err))
-
-    @staticmethod
-    def _parse_col(value: str):
-        value = value.strip()
-        if value.isdigit():
-            return int(value)
-        return value
+    def _start(self, worker: Worker):
+        self._workers.append(worker)
+        worker.finished.connect(lambda w=worker: self._workers.remove(w) if w in self._workers else None)
+        worker.start()
 
     def _run_analysis(self):
-        if not self.counts_path.get() or not self.metadata_path.get():
-            messagebox.showerror("Error", "Please select both the counts file and the metadata file.")
+        if not self.counts_path or not self.metadata_path:
+            QMessageBox.critical(self, "Error", "Please select both the counts file and the metadata file.")
             return
-
         contrast = None
-        if not self.pairwise_all.get():
-            t, r = self.test_group_var.get(), self.ref_group_var.get()
+        if not self.pairwise.isChecked():
+            t, r = self.test_combo.currentText(), self.ref_combo.currentText()
             if not t or not r or t == r:
-                messagebox.showerror(
-                    "Error",
-                    "Choose a test group and a DIFFERENT reference group, or enable the "
-                    "pairwise comparison of all pairs."
-                )
+                QMessageBox.critical(self, "Error", "Choose a test group and a DIFFERENT reference group, or "
+                                                    "enable the pairwise comparison of all pairs.")
                 return
-            contrast = [t, r]   # [numerator, denominator]: log2FC > 0 = higher in t
-
-        run_ora = self.run_ora.get()
-        ora_direction = self.ORA_DIRECTION_MAP.get(self.ora_direction_display.get(), "all")
-        gene_list = [g.strip() for g in re.split(r"[,;\n]+", self.gene_list_var.get()) if g.strip()]
-        if gene_list and len(set(g.upper() for g in gene_list)) < 2:
-            messagebox.showerror("Error", "Enter at least 2 genes, or leave the field empty to analyze all genes.")
+            contrast = [t, r]  
+        gene_list = self._gene_list()
+        if gene_list and len({g.upper() for g in gene_list}) < 2:
+            QMessageBox.critical(self, "Error",
+                                 "Enter at least 2 genes, or leave the field empty to analyze all genes.")
             return
 
-        # Snapshot of the settings used for this run (the widgets may change afterwards);
-        # it is what the PDF report documents.
+        kw = dict(
+            counts_path=self.counts_path, metadata_path=self.metadata_path, method=self._method(),
+            gene_col=self._parse_col(self.gene_col.text()), sample_col=self._parse_col(self.sample_col.text()),
+            condition_col=self._parse_col(self.condition_col.text()), contrast=contrast,
+            pairwise_all=self.pairwise.isChecked(), padj_cutoff=self.padj_cutoff.value(),
+            lfc_cutoff=self.lfc_cutoff.value(), min_counts=self.min_counts.value(),
+            gsea_category=self.gsea_category.currentText(),
+            gsea_subcategory=(self.gsea_subcategory.text() or None), run_ora=self.run_ora.isChecked(),
+            ora_direction=self.ORA_DIRECTION_MAP.get(self.ora_dir.currentText(), "all"),
+            gene_list=gene_list or None, species=self._species_value())
+
         self._pending_params = {
-            "counts_file": self.counts_path.get(),
-            "metadata_file": self.metadata_path.get(),
-            "method": self.method.get(),
-            "gene_col": self.gene_col.get(),
-            "sample_col": self.sample_col.get(),
-            "condition_col": self.condition_col.get(),
-            "contrast": list(contrast) if contrast else None,
-            "pairwise_all": self.pairwise_all.get(),
-            "species": self._species_value(),
-            "gene_list": list(gene_list),
-            "padj_cutoff": self.padj_cutoff.get(),
-            "lfc_cutoff": self.lfc_cutoff.get(),
-            "min_counts": self.min_counts_var.get(),
-            "gsea_category": self.gsea_category.get(),
-            "gsea_subcategory": self.gsea_subcategory.get(),
-            "run_ora": run_ora,
-            "ora_direction": self.ora_direction_display.get(),
-            "top_n_pathways": self.top_n_pathways.get(),
-            "top_n_ora": self.top_n_ora.get(),
-            "started": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
+            "counts_file": self.counts_path, "metadata_file": self.metadata_path, "method": self._method(),
+            "gene_col": self.gene_col.text(), "sample_col": self.sample_col.text(),
+            "condition_col": self.condition_col.text(), "contrast": list(contrast) if contrast else None,
+            "pairwise_all": self.pairwise.isChecked(), "species": self._species_value(),
+            "gene_list": list(gene_list), "padj_cutoff": self.padj_cutoff.value(),
+            "lfc_cutoff": self.lfc_cutoff.value(), "min_counts": self.min_counts.value(),
+            "gsea_category": self.gsea_category.currentText(), "gsea_subcategory": self.gsea_subcategory.text(),
+            "run_ora": self.run_ora.isChecked(), "ora_direction": self.ora_dir.currentText(),
+            "top_n_pathways": self.gsea_topn.value(), "top_n_ora": self.ora_topn.value(),
+            "started": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),}
 
-        self.run_button.configure(state="disabled")
-        self.progress.start(10)
-        self._run_start_time = time.time()
-        self._tick_timer()
+        self.run_button.setProperty("running", True)
+        self.run_button.setEnabled(False)
+        self.run_button.setText("Running…")
+        self._busy(True)
+        self._run_start = time.time()
+        self._tick()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(1000)
 
-        def task():
-            try:
-                results = engine.run_dea(
-                    counts_path=self.counts_path.get(),
-                    metadata_path=self.metadata_path.get(),
-                    method=self.method.get(),
-                    gene_col=self._parse_col(self.gene_col.get()),
-                    sample_col=self._parse_col(self.sample_col.get()),
-                    condition_col=self._parse_col(self.condition_col.get()),
-                    contrast=contrast,
-                    pairwise_all=self.pairwise_all.get(),
-                    padj_cutoff=self.padj_cutoff.get(),
-                    lfc_cutoff=self.lfc_cutoff.get(),
-                    min_counts=self.min_counts_var.get(),
-                    gsea_category=self.gsea_category.get(),
-                    gsea_subcategory=(self.gsea_subcategory.get() or None),
-                    run_ora=run_ora,
-                    ora_direction=ora_direction,
-                    gene_list=gene_list or None,
-                    species=self._species_value(),
-                    log_callback=self._threadsafe_log,
-                )
-                self.root.after(0, lambda: self._on_results_ready(results))
-            except engine.RPipelineError as e:
-                self.root.after(0, lambda e=e: self._on_error("Analysis failed", e))
-            finally:
-                self.root.after(0, self._stop_run_ui)
+        w = Worker(lambda cb: engine.run_dea(log_callback=cb, **kw), "Analysis failed", self)
+        w.log.connect(self._log)
+        w.done.connect(self._on_results_ready)
+        w.failed.connect(self._on_error)
+        w.finished.connect(self._stop_run_ui)
+        self._start(w)
 
-        threading.Thread(target=task, daemon=True).start()
-
-    def _tick_timer(self):
-        if self._run_start_time is None:
+    def _tick(self):
+        if self._run_start is None:
             return
-        elapsed = int(time.time() - self._run_start_time)
-        mm, ss = divmod(elapsed, 60)
-        self.status_var.set(f"Analysis running (DESeq2/limma + ORA + GSEA)... elapsed time: {mm:02d}:{ss:02d}")
-        self._timer_job = self.root.after(1000, self._tick_timer)
+        mm, ss = divmod(int(time.time() - self._run_start), 60)
+        self.run_elapsed.setText(f"Elapsed {mm:02d}:{ss:02d}")
+        self.statusBar().showMessage("Analysis running (DESeq2/limma + ORA + GSEA)…")
 
     def _stop_run_ui(self):
-        self.progress.stop()
+        self._busy(False)
+        t = getattr(self, "_timer", None)
+        if t is not None:
+            t.stop()
+        self._run_start = None
+        self.run_elapsed.setText("")
+        self.run_button.setProperty("running", False)
+        self.run_button.setText("Run analysis")
         self._validate_setup()
-        self._run_start_time = None
-        if self._timer_job:
-            self.root.after_cancel(self._timer_job)
-            self._timer_job = None
-        self.status_var.set("Ready.")
+        self.statusBar().showMessage("Ready.")
 
-    def _on_results_ready(self, results: engine.RunResults):
+    def _on_error(self, title: str, err):
+        self._log(f"[ERROR] {title}: {err}")
+        QMessageBox.critical(self, title, str(err))
+
+    def _on_results_ready(self, results):
         self.results = results
         self.run_params = dict(self._pending_params or {})
-        if self._run_start_time is not None:
-            mm, ss = divmod(int(time.time() - self._run_start_time), 60)
+        if self._run_start is not None:
+            mm, ss = divmod(int(time.time() - self._run_start), 60)
             self.run_params["duration"] = f"{mm:02d}:{ss:02d} (mm:ss)"
-        if hasattr(self, "report_button"):
-            self.report_button.configure(state="normal")
+        self.report_button.setEnabled(True)
         tags = list(results.per_contrast.keys())
-        for _c in self._contrast_combos:
-            _c["values"] = tags
-        if tags:
-            self.active_tag.set(tags[0])
+        for c in self._contrast_combos:
+            c.blockSignals(True)
+            c.clear()
+            c.addItems(tags)
+            c.blockSignals(False)
+        self.active_tag = tags[0] if tags else ""
+        self._sync_contrast_combos()
+        for p in self._result_pages:
+            p.set_ready(True)
         self._log(">>> Analysis completed successfully.")
         self._refresh_pca_color_columns()
         self._refresh_gene_plot_columns()
         self._refresh_all_views()
-        self.notebook.select(self.tab_pca)
+        self._switch_page("pca")
+        self.notify("Analysis completed")
+
+    def _sync_contrast_combos(self):
+        for c in self._contrast_combos:
+            c.blockSignals(True)
+            c.setCurrentText(self.active_tag)
+            c.blockSignals(False)
+
+    def _on_contrast_selected(self, text: str):
+        if not text or text == self.active_tag:
+            return
+        self.active_tag = text
+        self._sync_contrast_combos()
+        self._refresh_all_views()
+
+    def _active_result(self):
+        return None if self.results is None else self.results.per_contrast.get(self.active_tag)
+
+    @staticmethod
+    def _dir_names(res):
+        hi = res.group_high if res is not None and res.group_high else "group 1 (log2FC>0)"
+        lo = res.group_low if res is not None and res.group_low else "group 2 (log2FC<0)"
+        return hi, lo
+
+    def _contrast_title(self, tag: str) -> str:
+        res = self.results.per_contrast.get(tag) if self.results else None
+        return res.label if res is not None else str(tag).replace("_", " ")
+
+    def _regulation_options(self, res):
+        hi, lo = self._dir_names(res)
+        return ["All", f"Higher in {hi} only", f"Higher in {lo} only", "Not significant only"]
+
+    @staticmethod
+    def _direction_text(kind: str, res) -> str:
+        if res is None:
+            return ""
+        if not (res.group_high and res.group_low):
+            return "The direction of the comparison cannot be determined automatically for this contrast."
+        hi, lo = res.group_high, res.group_low
+        if kind == "gsea":
+            return (f'Contrast {hi} vs {lo}:  NES > 0 = enriched among genes higher in "{hi}"   |   '
+                    f'NES < 0 = among genes higher in "{lo}" (reference)')
+        if kind == "ora":
+            return (f'Contrast {hi} vs {lo}:  UP = genes higher in "{hi}"   |   '
+                    f'DOWN = genes higher in "{lo}" (reference)')
+        return (f'Contrast {hi} vs {lo}:  log2FC > 0 = higher in "{hi}"   |   '
+                f'log2FC < 0 = higher in "{lo}" (reference)')
+
+    def _update_direction_labels(self):
+        res = self._active_result()
+        for kind, lab in self._direction_labels.items():
+            txt = self._direction_text(kind, res)
+            lab.setText(txt)
+            lab.setVisible(bool(txt))
+        if res is not None:
+            opts = self._regulation_options(res)
+            idx = max(self.table_reg.currentIndex(), 0)
+            self.table_reg.blockSignals(True)
+            self.table_reg.clear()
+            self.table_reg.addItems(opts)
+            self.table_reg.setCurrentIndex(min(idx, len(opts) - 1))
+            self.table_reg.blockSignals(False)
 
     def _refresh_all_views(self):
         if self.results is None:
@@ -2698,36 +1037,90 @@ class DEAApp(ttk.Frame):
         self._draw_ora()
         self._draw_gene_plot()
 
-    # ---- PCA coloring helpers -------------------------------------------------
+    def _on_cutoffs_changed(self):
+        if self.results is not None:
+            self._draw_volcano()
+            self._populate_gene_table()
+            self._draw_gsea()
+            self._draw_ora()
+
+    def _build_pca_page(self) -> QWidget:
+        self.pca_labels = QCheckBox("Show sample labels")
+        self.pca_labels.setToolTip("Writes the ID of each sample next to its point.")
+        self.pca_ellipses = QCheckBox("Confidence ellipses per group")
+        self.pca_ellipses.setToolTip("Ellipse around each group (needs ≥ 3 samples per group).")
+        self.pca_colorblind = QCheckBox("Colour-blind-friendly palette")
+        self.pca_colorblind.setToolTip("Okabe-Ito palette, readable with colour vision deficiency.")
+        self.pca_title = QLineEdit()
+        self.pca_title.setPlaceholderText("PCA of Count Data")
+        disp = Card("Display")
+        for w in (self.pca_labels, self.pca_ellipses, self.pca_colorblind):
+            disp.body().addWidget(w)
+        disp.body().addWidget(field("Custom title", self.pca_title))
+
+        self.pca_color_combo = RefreshCombo(self._refresh_pca_color_columns)
+        self.pca_color_combo.addItem(pcol.DEFAULT_COLUMN)
+        self.pca_color_combo.setToolTip(
+            "Colors the points by any metadata column. Numeric columns get a continuous scale + colour bar; text "
+            "columns one color per group. Missing values are grey.")
+        self.pca_kind = self._combo(pcol.KIND_CHOICES)
+        self.pca_kind.setToolTip("'Auto' decides from the values. Force 'Categorical' for numeric codes that are "
+                                 "really groups, or 'Numeric' for a continuous scale.")
+        self.pca_cmap = self._combo(pcol.CMAPS.keys(), "Red → Blue")
+        colr = Card("Colour points by")
+        colr.body().addWidget(field("Metadata column", self.pca_color_combo))
+        colr.body().addWidget(field("Type", self.pca_kind))
+        colr.body().addWidget(field("Scale (numeric)", self.pca_cmap))
+
+        expl = ("PCA (Principal Component Analysis): each point is a sample. Samples with similar colour/condition "
+                "that sit close together have similar expression profiles. PC1 and PC2 report the percentage of "
+                "variance explained. Use the toolbar's magnifier to zoom and the annotation tools to add arrows, "
+                "boxes or text before exporting the figure for publication.")
+        self.pca_panel = PlotPanel(expl, redraw_callback=self._draw_pca)
+
+        for w in (self.pca_labels, self.pca_ellipses, self.pca_colorblind):
+            w.toggled.connect(lambda *_: self._draw_pca())
+        self.pca_title.editingFinished.connect(self._draw_pca)
+        self.pca_color_combo.activated.connect(lambda *_: self._draw_pca())
+        self.pca_kind.activated.connect(lambda *_: self._draw_pca())
+        self.pca_cmap.activated.connect(lambda *_: self._draw_pca())
+        return self._result_layout("pca", "PCA", "Global structure of the samples — one point per sample.",
+                                   self.pca_panel, self._inspector(disp, colr), with_contrast=False)
+
     def _pca_meta_source(self):
-        """(metadata_path, sample_col) of the run that produced the current results."""
         rp = self.run_params or {}
-        path = rp.get("metadata_file") or self.metadata_path.get()
-        sample_col = self._parse_col(str(rp.get("sample_col", self.sample_col.get())))
+        path = rp.get("metadata_file") or self.metadata_path
+        sample_col = self._parse_col(str(rp.get("sample_col", self.sample_col.text())))
         return path, sample_col
 
+    def _read_meta_cached(self, path: str) -> pd.DataFrame:
+        mtime = os.path.getmtime(path)
+        if self._meta_cache[0] != path or self._meta_cache[1] != mtime:
+            self._meta_cache = (path, mtime, pcol.read_metadata(path))
+        return self._meta_cache[2]
+
     def _refresh_pca_color_columns(self):
-        """Fills the 'Color by' list with the columns of the metadata file."""
         combo = getattr(self, "pca_color_combo", None)
         if combo is None:
             return
-        path = self.metadata_path.get().strip()
         cols = []
+        path = self.metadata_path.strip()
         if path and os.path.isfile(path):
             try:
-                mtime = os.path.getmtime(path)
-                if self._meta_cache[0] != path or self._meta_cache[1] != mtime:
-                    self._meta_cache = (path, mtime, pcol.read_metadata(path))
-                cols = list(self._meta_cache[2].columns)
-            except Exception:
+                cols = list(self._read_meta_cached(path).columns)
+            except Exception:  # noqa: BLE001
                 cols = []
-        combo["values"] = [pcol.DEFAULT_COLUMN] + cols
-        if self.pca_color_col.get() not in combo["values"]:
-            self.pca_color_col.set(pcol.DEFAULT_COLUMN)
+        items = [pcol.DEFAULT_COLUMN] + cols
+        current = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(items)
+        combo.setCurrentText(current if current in items else pcol.DEFAULT_COLUMN)
+        combo.blockSignals(False)
 
     def pca_color_settings(self) -> dict:
-        return {"column": self.pca_color_col.get(), "kind": self.pca_color_kind.get(),
-                "colorblind": bool(self.pca_colorblind.get()), "cmap": self.pca_cmap.get()}
+        return {"column": self.pca_color_combo.currentText(), "kind": self.pca_kind.currentText(),
+                "colorblind": self.pca_colorblind.isChecked(), "cmap": self.pca_cmap.currentText()}
 
     def _draw_pca(self):
         if self.results is None:
@@ -2736,7 +1129,7 @@ class DEAApp(ttk.Frame):
         if self._pca_colorbar is not None:
             try:
                 self._pca_colorbar.remove()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
             self._pca_colorbar = None
         panel.clear()
@@ -2744,43 +1137,37 @@ class DEAApp(ttk.Frame):
         if "condition" not in df.columns:
             panel.redraw()
             return
-
         meta_path, sample_col = self._pca_meta_source()
         try:
             spec = pcol.spec_from_settings(df, meta_path, sample_col, self.pca_color_settings())
-        except Exception as e:
-            messagebox.showwarning("PCA colors",
-                                   f"Cannot color by '{self.pca_color_col.get()}':\n{e}\n\n"
-                                   "Falling back to the condition colors.")
-            self.pca_color_col.set(pcol.DEFAULT_COLUMN)
-            spec = pcol.condition_spec(df, self.pca_colorblind.get())
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "PCA colors", f"Cannot color by '{self.pca_color_combo.currentText()}':\n{e}"
+                                                    "\n\nFalling back to the condition colors.")
+            self.pca_color_combo.setCurrentText(pcol.DEFAULT_COLUMN)
+            spec = pcol.condition_spec(df, self.pca_colorblind.isChecked())
 
-        show_ellipses = self.pca_show_ellipses.get()
+        show_ellipses = self.pca_ellipses.isChecked()
 
         def ellipse_fn(x, y, ax, color):
             if show_ellipses:
-                confidence_ellipse(x, y, ax, n_std=1.5, facecolor=color, alpha=0.15,
-                                    edgecolor=color, linewidth=1.2)
+                confidence_ellipse(x, y, ax, n_std=1.5, facecolor=color, alpha=0.15, edgecolor=color, linewidth=1.2)
 
-        artists, extra_handles = pcol.draw_pca_points(panel.ax, df, spec, size=80,
-                                                      alpha=0.85, ellipse_fn=ellipse_fn)
-        if self.pca_show_labels.get() and "SampleID" in df.columns:
+        artists, extra_handles = pcol.draw_pca_points(panel.ax, df, spec, size=80, alpha=0.85, ellipse_fn=ellipse_fn)
+        if self.pca_labels.isChecked() and "SampleID" in df.columns:
             for _, r in df.iterrows():
-                panel.ax.annotate(str(r["SampleID"]), xy=(r["PC1"], r["PC2"]),
-                                   xytext=(4, 4), textcoords="offset points", fontsize=7)
+                panel.ax.annotate(str(r["SampleID"]), xy=(r["PC1"], r["PC2"]), xytext=(4, 4),
+                                  textcoords="offset points", fontsize=7)
         panel.ax.set_xlabel(self.results.pca_x_label)
         panel.ax.set_ylabel(self.results.pca_y_label)
-        title = self.pca_title_var.get().strip() or "PCA of Count Data"
-        panel.ax.set_title(title)
+        panel.ax.set_title(self.pca_title.text().strip() or "PCA of Count Data")
 
         if spec["mode"] == "numeric":
-            # Legend = colour bar (+ a small legend entry for missing values, if any)
-            if panel.legend_on.get():
+            if panel.legend_enabled():
                 self._pca_colorbar = pcol.add_colorbar(panel.figure, panel.ax, spec)
-            if extra_handles and panel.legend_on.get():
+            if extra_handles and panel.legend_enabled():
                 from matplotlib.lines import Line2D
-                handles = [Line2D([], [], marker="o", ls="", markerfacecolor=c,
-                                   markeredgecolor="black", label=lbl) for lbl, c in extra_handles]
+                handles = [Line2D([], [], marker="o", ls="", markerfacecolor=c, markeredgecolor="black", label=lbl)
+                           for lbl, c in extra_handles]
                 panel.place_legend(handles=handles)
         else:
             panel.place_legend(title=spec["column"])
@@ -2792,33 +1179,101 @@ class DEAApp(ttk.Frame):
             col_name = spec["column"]
 
             def fmt(idx_tuple):
-                artist_idx, point_idx = idx_tuple
-                row = all_sub[artist_idx].iloc[point_idx]
+                ai, pi = idx_tuple
+                row = all_sub[ai].iloc[pi]
                 val = row.get("_val")
                 val = "n.a." if pd.isna(val) else val
                 return f"{row.get('SampleID', '?')}\n{col_name}: {val}"
             panel.enable_hover(all_sc, lambda idx: fmt(idx) if isinstance(idx, tuple) else str(idx))
         panel.redraw()
 
+    def _build_volcano_page(self) -> QWidget:
+        self.volcano_mode = self._combo(self.LABEL_MODE_DISPLAY)
+        self.volcano_mode.setToolTip("Which genes get their name written on the chart.")
+        self.volcano_topn = self._spin(1, 200, 15)
+        self.volcano_font = self._spin(6, 20, 8)
+        self.volcano_custom = QLineEdit()
+        self.volcano_custom.setPlaceholderText("TP53, MYC, EGFR")
+        self.volcano_leader = QCheckBox("Leader lines")
+        self.volcano_leader.setChecked(True)
+        self.volcano_leader.setToolTip("Thin line connecting each point to its label.")
+        lab = Card("Gene labels")
+        lab.body().addWidget(field("Mode", self.volcano_mode))
+        r = QHBoxLayout()
+        r.addWidget(field("Top N", self.volcano_topn))
+        r.addWidget(field("Font size", self.volcano_font))
+        lab.body().addLayout(r)
+        lab.body().addWidget(field("Specific genes", self.volcano_custom, "Comma-separated, e.g. TP53, MYC"))
+        lab.body().addWidget(self.volcano_leader)
+
+        self.sw_up = ColorSwatch(PALETTE["up"])
+        self.sw_down = ColorSwatch(PALETTE["down"])
+        self.sw_ns = ColorSwatch(PALETTE["ns"])
+        sw = QHBoxLayout()
+        for name, s in (("Up", self.sw_up), ("Down", self.sw_down), ("NS", self.sw_ns)):
+            sw.addWidget(QLabel(name))
+            sw.addWidget(s)
+            sw.addSpacing(8)
+        sw.addStretch()
+        self.volcano_size = self._spin(4, 80, 18, 1, 0)
+        self.volcano_alpha = self._spin(0.1, 1.0, 0.7, 0.05, 2)
+        self.volcano_title = QLineEdit()
+        app = Card("Appearance")
+        app.body().addLayout(sw)
+        pr = QHBoxLayout()
+        pr.addWidget(field("Point size", self.volcano_size))
+        pr.addWidget(field("Alpha", self.volcano_alpha))
+        app.body().addLayout(pr)
+        app.body().addWidget(field("Custom title", self.volcano_title))
+        note = QLabel("Cutoffs set in Setup update this chart live — no need to rerun R.")
+        note.setObjectName("cardHint")
+        note.setWordWrap(True)
+        app.body().addWidget(note)
+
+        expl = ("Volcano plot: each point is a gene. X axis = log2 Fold Change; Y axis = -log10(padj). "
+                "Colours follow the cutoffs set in Setup or the custom selections on the right.")
+        self.volcano_panel = PlotPanel(expl, redraw_callback=self._draw_volcano)
+
+        self._volcano_df = None
+        self.volcano_panel.canvas.mpl_connect("button_press_event", self._on_volcano_click)
+        trig = self._debounce(self._draw_volcano, 250)
+        for w in (self.volcano_topn, self.volcano_font, self.volcano_size, self.volcano_alpha):
+            w.valueChanged.connect(trig)
+        self.volcano_mode.activated.connect(lambda *_: self._draw_volcano())
+        self.volcano_leader.toggled.connect(lambda *_: self._draw_volcano())
+        for e in (self.volcano_custom, self.volcano_title):
+            e.editingFinished.connect(self._draw_volcano)
+        for s in (self.sw_up, self.sw_down, self.sw_ns):
+            s.colorChanged.connect(lambda *_: self._draw_volcano())
+        return self._result_layout("volcano", "Volcano plot", "Effect size against statistical significance.",
+                                   self.volcano_panel, self._inspector(lab, app))
+
+    def _on_volcano_click(self, ev):
+        p, df = self.volcano_panel, self._volcano_df
+        if (df is None or df.empty or not ev.dblclick or ev.inaxes is not p.ax or p.annotation_mode != "none"
+                or getattr(p.toolbar, "mode", "")):
+            return
+        pts = p.ax.transData.transform(df[["log2FoldChange", "neglog10_padj"]].to_numpy(dtype=float))
+        dist = np.hypot(pts[:, 0] - ev.x, pts[:, 1] - ev.y)
+        i = int(np.argmin(dist))
+        if dist[i] <= 14:
+            self._gene_to_counts(str(df.iloc[i]["GeneID"]))
+
     def _compute_label_subset(self, df: pd.DataFrame, mode: str) -> pd.DataFrame:
         if mode == "none" or df.empty:
             return df.iloc[0:0]
+        sig = df[df["status"] != "Not Significant"].copy()
         if mode == "all_sig":
-            return df[df["status"] != "Not Significant"]
+            return sig
+        n = self.volcano_topn.value()
         if mode == "top_padj":
-            sig = df[df["status"] != "Not Significant"].copy()
-            sig = sig.sort_values("padj")
-            return sig.head(self.volcano_label_topn.get())
+            return sig.sort_values("padj").head(n)
         if mode == "top_lfc":
-            sig = df[df["status"] != "Not Significant"].copy()
             sig["_abs_lfc"] = sig["log2FoldChange"].abs()
-            sig = sig.sort_values("_abs_lfc", ascending=False)
-            return sig.head(self.volcano_label_topn.get())
+            return sig.sort_values("_abs_lfc", ascending=False).head(n)
         if mode == "custom":
-            genes = [g.strip() for g in self.volcano_label_custom.get().split(",") if g.strip()]
-            if not genes:
-                return df.iloc[0:0]
-            return df[df["GeneID"].astype(str).isin(genes)]
+            genes = [g.strip() for g in self.volcano_custom.text().split(",") if g.strip()]
+            return df[df["GeneID"].astype(str).isin(genes)] if genes else df.iloc[0:0]
         return df.iloc[0:0]
 
     def _draw_volcano(self):
@@ -2826,179 +1281,397 @@ class DEAApp(ttk.Frame):
             return
         panel = self.volcano_panel
         panel.clear()
-        tag = self.active_tag.get()
+        tag = self.active_tag
         if not tag or tag not in self.results.per_contrast:
             panel.redraw()
             return
         res = self.results.per_contrast[tag]
-        df = engine.categorize_volcano(res.res_tbl, self.padj_cutoff.get(), self.lfc_cutoff.get())
+        padj_c, lfc_c = self.padj_cutoff.value(), self.lfc_cutoff.value()
+        df = engine.categorize_volcano(res.res_tbl, padj_c, lfc_c)
         df = df.dropna(subset=["padj"]).copy()
         df["neglog10_padj"] = -np.log10(df["padj"].clip(lower=1e-300))
-
-        color_map = {
-            "Upregulated": self.volcano_color_up.get(),
-            "Downregulated": self.volcano_color_down.get(),
-            "Not Significant": self.volcano_color_ns.get(),
-        }
-        size = self.volcano_point_size.get()
-        alpha = self.volcano_point_alpha.get()
+        self._volcano_df = df
+        color_map = {"Upregulated": self.sw_up.color(), "Downregulated": self.sw_down.color(),
+                     "Not Significant": self.sw_ns.color()}
+        size, alpha = self.volcano_size.value(), self.volcano_alpha.value()
         scatters = {}
         for status, color in color_map.items():
             sub = df[df["status"] == status]
             if sub.empty:
                 continue
-            sc = panel.ax.scatter(sub["log2FoldChange"], sub["neglog10_padj"],
-                                   c=color, s=size, alpha=alpha, label=status, edgecolor="none")
+            panel.ax.scatter(sub["log2FoldChange"], sub["neglog10_padj"], c=color, s=size, alpha=alpha,
+                             label=status, edgecolor="none")
             scatters[status] = sub
-
-        panel.ax.axvline(self.lfc_cutoff.get(), linestyle="--", color="#8a8a8a", linewidth=1)
-        panel.ax.axvline(-self.lfc_cutoff.get(), linestyle="--", color="#8a8a8a", linewidth=1)
-        panel.ax.axhline(-math.log10(self.padj_cutoff.get()), linestyle="--", color="#8a8a8a", linewidth=1)
+        panel.ax.axvline(lfc_c, linestyle="--", color="#8a8a8a", linewidth=1)
+        panel.ax.axvline(-lfc_c, linestyle="--", color="#8a8a8a", linewidth=1)
+        panel.ax.axhline(-math.log10(padj_c), linestyle="--", color="#8a8a8a", linewidth=1)
         panel.ax.set_xlabel("log2 Fold Change")
         panel.ax.set_ylabel("-log10(padj)")
-        title = self.volcano_title_var.get().strip() or f"Volcano Plot — {self._contrast_title(tag)}"
-        panel.ax.set_title(title)
+        panel.ax.set_title(self.volcano_title.text().strip() or f"Volcano Plot — {self._contrast_title(tag)}")
         panel.place_legend()
 
-        mode = self.LABEL_MODE_MAP.get(self.volcano_label_mode_display.get(), "none")
+        mode = self.LABEL_MODE_MAP.get(self.volcano_mode.currentText(), "none")
         label_df = self._compute_label_subset(df, mode)
-        fontsize = self.volcano_label_fontsize.get()
-        use_leader = self.volcano_leader_lines.get()
+        fontsize, leader = self.volcano_font.value(), self.volcano_leader.isChecked()
         for _, row in label_df.iterrows():
-            x, y = row["log2FoldChange"], row["neglog10_padj"]
-            gene = str(row.get("GeneID", ""))
-            if use_leader:
-                panel.ax.annotate(gene, xy=(x, y), xytext=(8, 8), textcoords="offset points",
-                                   fontsize=fontsize, ha="left", va="bottom",
-                                   arrowprops=dict(arrowstyle="-", lw=0.4, color="#666666"))
+            x, y, gene = row["log2FoldChange"], row["neglog10_padj"], str(row.get("GeneID", ""))
+            if leader:
+                panel.ax.annotate(gene, xy=(x, y), xytext=(8, 8), textcoords="offset points", fontsize=fontsize,
+                                  ha="left", va="bottom", arrowprops=dict(arrowstyle="-", lw=0.4, color="#666666"))
             else:
                 panel.ax.text(x, y, gene, fontsize=fontsize, ha="left", va="bottom")
-
         panel.apply_common_style()
 
         if HAS_MPLCURSORS and scatters:
             try:
                 collections = panel.ax.collections[:len(scatters)]
-                sub_frames = list(scatters.values())
+                frames = list(scatters.values())
 
-                def fmt(idx_tuple, frames=sub_frames):
-                    artist_idx, point_idx = idx_tuple
-                    return str(frames[artist_idx].iloc[point_idx]["GeneID"])
+                def fmt(idx_tuple, frames=frames):
+                    ai, pi = idx_tuple
+                    return str(frames[ai].iloc[pi]["GeneID"])
                 panel.enable_hover(collections, lambda idx: fmt(idx) if isinstance(idx, tuple) else str(idx))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         panel.redraw()
 
+    def _build_table_page(self) -> QWidget:
+        content = QWidget()
+        v = QVBoxLayout(content)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
+        bar = Card()
+        r = QHBoxLayout()
+        r.setSpacing(10)
+        self.table_filter = QLineEdit()
+        self.table_filter.setPlaceholderText("Search gene…")
+        self.table_filter.setClearButtonEnabled(True)
+        self.table_filter.setMinimumWidth(220)
+        self.table_reg = QComboBox()
+        self.table_reg.addItems(["All", "Upregulated only", "Downregulated only", "Not Significant only"])
+        self.table_reg.setMinimumWidth(240)
+        exp = QPushButton("Export CSV…")
+        exp.clicked.connect(self._export_gene_table)
+        hm = QPushButton("Heatmap…")
+        hm.setObjectName("primary")
+        hm.setStyleSheet("padding: 7px 18px; font-size: 9.5pt;")
+        hm.setToolTip("Interactive clustered heatmap of the differentially expressed genes in a separate window.")
+        hm.clicked.connect(lambda *_: self._open_heatmap())
+        self.hm_sel = QPushButton("Heatmap of selection…")
+        self.hm_sel.setEnabled(False)
+        self.hm_sel.setToolTip("Select rows in the table (Ctrl/Shift+click) and open them as a custom-gene heatmap.")
+        self.hm_sel.clicked.connect(lambda *_: self._open_heatmap(self._selected_genes()))
+        self.table_count = QLabel("")
+        self.table_count.setObjectName("muted")
+        r.addWidget(self.table_filter)
+        r.addWidget(self.table_reg)
+        r.addWidget(exp)
+        r.addWidget(hm)
+        r.addWidget(self.hm_sel)
+        r.addStretch()
+        r.addWidget(self.table_count)
+        bar.body().addLayout(r)
+        v.addWidget(bar)
+        self.gene_model = DataFrameModel(pd.DataFrame(columns=["GeneID", "Regulation", "Significant",
+                                                               "log2FoldChange", "pvalue", "padj", "stat"]))
+        self.gene_view = self._table_view(self.gene_model)
+        self.gene_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.gene_view.setSelectionMode(QTableView.ExtendedSelection)
+        self.gene_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.gene_view.customContextMenuRequested.connect(self._gene_table_menu)
+        self.gene_view.doubleClicked.connect(lambda idx: self._gene_to_counts(self.gene_model.gene_at(idx.row())))
+        self.gene_view.selectionModel().selectionChanged.connect(
+            lambda *_: self.hm_sel.setEnabled(bool(self.gene_view.selectionModel().selectedRows())))
+        QShortcut(QKeySequence(QKeySequence.Copy), self.gene_view, activated=self._copy_selected_rows).setContext(
+            Qt.WidgetShortcut)
+        v.addWidget(self.gene_view, 1)
+        self.table_filter.textChanged.connect(self._debounce(self._populate_gene_table, 180))
+        self.table_reg.activated.connect(lambda *_: self._populate_gene_table())
+        return self._result_layout("table", "Gene table", "Every tested gene with its statistics for the active contrast.",
+                                   content, None)
+
+    def _selected_rows(self) -> list[int]:
+        return sorted({i.row() for i in self.gene_view.selectionModel().selectedRows()})
+
+    def _selected_genes(self) -> list[str]:
+        genes = [self.gene_model.gene_at(r) for r in self._selected_rows()]
+        return [g for g in genes if g]
+
+    def _copy_selected_rows(self):
+        rows = self._selected_rows()
+        if rows:
+            QGuiApplication.clipboard().setText(self.gene_model.rows_as_text(rows))
+            self.notify(f"{len(rows)} rows copied")
+
+    def _add_to_volcano_labels(self, genes: list[str]):
+        if not genes:
+            return
+        cur = [g.strip() for g in self.volcano_custom.text().split(",") if g.strip()]
+        self.volcano_custom.setText(", ".join(dict.fromkeys(cur + genes)))
+        self.volcano_mode.setCurrentText("Specific genes (list)")
+        self._draw_volcano()
+        self.notify(f"{len(genes)} gene(s) labelled on the volcano plot")
+
+    def _gene_table_menu(self, pos):
+        genes = self._selected_genes()
+        idx = self.gene_view.indexAt(pos)
+        if not genes and idx.isValid():
+            genes = [g for g in [self.gene_model.gene_at(idx.row())] if g]
+        m = QMenu(self)
+        if genes:
+            first = genes[0]
+            m.addAction(f"Open {first} in Gene counts", lambda: self._gene_to_counts(first))
+            m.addAction(f"Label on volcano plot ({len(genes)})", lambda: self._add_to_volcano_labels(genes))
+            m.addAction(f"Heatmap of selection ({len(genes)})", lambda: self._open_heatmap(genes))
+            m.addSeparator()
+            m.addAction("Copy gene names", lambda: QGuiApplication.clipboard().setText("\n".join(genes)))
+            m.addAction("Copy rows (Ctrl+C)", self._copy_selected_rows)
+        else:
+            m.addAction("Select one or more rows first").setEnabled(False)
+        m.exec(QCursor.pos())
+
     def _populate_gene_table(self):
-        for row in self.gene_tree.get_children():
-            self.gene_tree.delete(row)
-        tag = self.active_tag.get()
+        tag = self.active_tag
         if not tag or self.results is None or tag not in self.results.per_contrast:
-            if hasattr(self, "table_count_lbl"):
-                self.table_count_lbl.configure(text="")
+            self.table_count.setText("")
             return
         res = self.results.per_contrast[tag]
         ranked = res.ranked_tbl
         if ranked is None or ranked.empty:
-            if hasattr(self, "table_count_lbl"):
-                self.table_count_lbl.configure(text="No genes to show.")
+            self.gene_model.set_data(pd.DataFrame(columns=self.gene_model._raw.columns))
+            self.table_count.setText("No genes to show.")
             return
-        # Regulation/Significant recomputed with the current cutoffs, naming the groups
         ranked = engine.annotate_regulation(ranked, res.group_high, res.group_low,
-                                            self.padj_cutoff.get(), self.lfc_cutoff.get())
+                                            self.padj_cutoff.value(), self.lfc_cutoff.value())
         hi, lo = self._dir_names(res)
-        filt = self.table_filter_var.get().strip().lower()
+        filt = self.table_filter.text().strip().lower()
         if filt:
-            ranked = ranked[ranked["GeneID"].astype(str).str.lower().str.contains(filt)]
-
-        reg_filter = self.table_regulation_filter.get()
-        opts = self._regulation_options(res)
-        if reg_filter == opts[1]:
+            ranked = ranked[ranked["GeneID"].astype(str).str.lower().str.contains(filt, regex=False)]
+        sel = self.table_reg.currentIndex()
+        if sel == 1:
             ranked = ranked[ranked["Regulation"] == f"Higher in {hi}"]
-        elif reg_filter == opts[2]:
+        elif sel == 2:
             ranked = ranked[ranked["Regulation"] == f"Higher in {lo}"]
-        elif reg_filter == opts[3]:
+        elif sel == 3:
             ranked = ranked[ranked["Regulation"] == "Not significant"]
 
-        for _, r in ranked.iterrows():
-            reg_text = str(r.get("Regulation", ""))
-            sig_text = str(r.get("Significant", ""))
-            row_tag = ("up" if reg_text == f"Higher in {hi}" else
-                       "down" if reg_text == f"Higher in {lo}" else "ns")
-            self.gene_tree.insert("", "end", values=(
-                r.get("GeneID", ""), r.get("Regulation", ""), sig_text,
-                round(r.get("log2FoldChange", float("nan")), 3) if pd.notna(r.get("log2FoldChange")) else "",
-                _fmt_sci(r.get("pvalue")), _fmt_sci(r.get("padj")),
-                round(r.get("stat", float("nan")), 3) if pd.notna(r.get("stat")) else "",
-            ), tags=(row_tag,))
+        cols = ["GeneID", "Regulation", "Significant", "log2FoldChange", "pvalue", "padj", "stat"]
+        raw = ranked.reindex(columns=cols).copy()
+        shown = pd.DataFrame({
+            "GeneID": raw["GeneID"].astype(str), "Regulation": raw["Regulation"].astype(str),
+            "Significant": raw["Significant"].astype(str),
+            "log2FoldChange": raw["log2FoldChange"].map(_round_or_blank),
+            "pvalue": raw["pvalue"].map(_fmt_sci), "padj": raw["padj"].map(_fmt_sci),
+            "stat": raw["stat"].map(_round_or_blank)})
+        colors = [PALETTE["up"] if r == f"Higher in {hi}" else PALETTE["down"] if r == f"Higher in {lo}"
+                  else PALETTE["muted"] for r in raw["Regulation"].astype(str)]
+        self.gene_model.set_data(raw, shown, colors)
+        self.table_count.setText(f"{len(raw):,} genes shown")
 
-        if hasattr(self, "table_count_lbl"):
-            self.table_count_lbl.configure(text=f"{len(ranked)} genes shown")
+    def _export_gene_table(self):
+        tag = self.active_tag
+        if not tag or self.results is None or tag not in self.results.per_contrast:
+            QMessageBox.information(self, "Info", "No results to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export gene table", "gene_table.csv", "CSV (*.csv)")
+        if path:
+            res = self.results.per_contrast[tag]
+            out = engine.annotate_regulation(res.ranked_tbl, res.group_high, res.group_low,
+                                             self.padj_cutoff.value(), self.lfc_cutoff.value())
+            out.to_csv(path, index=False)
+            self.notify(f"Table exported to {os.path.basename(path)}")
+
+    def _open_heatmap(self, preset_genes: list[str] | None = None):
+        """Heatmap clusterizzata del contrasto attivo, in una finestra a parte."""
+        res = self._active_result()
+        if self.results is None or res is None:
+            QMessageBox.information(self, "Heatmap", "Run an analysis first.")
+            return
+        nm = self.results.norm_matrix
+        if nm is None:
+            QMessageBox.information(self, "Heatmap", "The normalized expression matrix is not available for this "
+                                                     "run (see the Log page for the reason).")
+            return
+        if res.ranked_tbl is None or res.ranked_tbl.empty:
+            QMessageBox.information(self, "Heatmap", "No genes to show for this contrast.")
+            return
+        try:
+            import heatmap_window_qt as hmap  # finestra heatmap PySide6
+        except ImportError as e:
+            QMessageBox.warning(self, "Heatmap", f"Cannot load heatmap_window_qt.py:\n{e}")
+            return
+        pca = self.results.pca_data
+        cond = pd.Series(pca["condition"].astype(str).values, index=pca["SampleID"].astype(str).values)
+        meta, sample_col = None, 1
+        try:
+            meta_path, sample_col = self._pca_meta_source()
+            if meta_path and os.path.isfile(meta_path):
+                meta = self._read_meta_cached(meta_path)
+        except Exception:  # noqa: BLE001
+            meta = None
+
+        open_gene = self._gene_to_counts
+
+        ctx = {"norm_mat": nm, "norm_label": self.results.norm_label, "ranked": res.ranked_tbl, "cond": cond,
+               "group_high": res.group_high, "group_low": res.group_low, "padj": self.padj_cutoff.value(),
+               "lfc": self.lfc_cutoff.value(), "title": res.label, "meta": meta, "sample_col": sample_col,
+               "on_gene": open_gene, "preset_genes": preset_genes or None}
+        self._heatmap = hmap.HeatmapWindow(self, ctx)
+        self._heatmap.show()
+        self._heatmap.raise_()
+        self._heatmap.activateWindow()
+
+    @staticmethod
+    def _plot_table_stack(panel: PlotPanel, view: QTableView, table_height: int = 280) -> QScrollArea:
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(0, 0, 8, 0)
+        lay.setSpacing(14)
+        lay.addWidget(panel)
+        view.setMinimumHeight(table_height)
+        lay.addWidget(view)
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.NoFrame)
+        sa.setWidget(inner)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        return sa
+
+    @staticmethod
+    def _fit_plot_height(panel: PlotPanel, n_rows: int, per_row: int = 30, base: int = 230, min_h: int = 480):
+        panel.canvas.setMinimumHeight(max(min_h, base + per_row * int(n_rows)))
+
+    def _build_gsea_page(self) -> QWidget:
+        self.gsea_topn = self._spin(3, 100, 15)
+        self.gsea_stars = QCheckBox("Significance asterisks")
+        self.gsea_stars.setChecked(True)
+        self.gsea_stars.setToolTip("* padj<0.05   ** padj<0.01   *** padj<0.001 next to each bar.")
+        self.gsea_title = QLineEdit()
+        exp = QPushButton("Export pathway table…")
+        exp.clicked.connect(self._export_gsea_table)
+        opts = Card("Display")
+        opts.body().addWidget(field("Top N pathways", self.gsea_topn))
+        opts.body().addWidget(self.gsea_stars)
+        opts.body().addWidget(field("Custom title", self.gsea_title))
+        opts.body().addWidget(exp)
+
+        expl = ("GSEA (Gene Set Enrichment Analysis): shows the most modulated biological pathways. NES positive = "
+                'enriched among genes higher in the FIRST group of the contrast ("A" in "A vs B"), negative = among '
+                "genes higher in the reference group (B). Only pathways with padj below the chosen threshold (or "
+                "the top N by |NES| if none is significant) are shown.")
+        self.gsea_panel = PlotPanel(expl, figsize=(8.0, 4.5), redraw_callback=self._draw_gsea, min_height=480)
+        self.gsea_model = DataFrameModel(pd.DataFrame(columns=["pathway", "NES", "padj", "size"]), align_left=(0,))
+        self.gsea_view = self._table_view(self.gsea_model)
+        self.gsea_view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+        self.gsea_view.horizontalHeader().resizeSection(0, 360)
+        split = self._plot_table_stack(self.gsea_panel, self.gsea_view)
+
+        trig = self._debounce(self._draw_gsea, 200)
+        self.gsea_topn.valueChanged.connect(trig)
+        self.gsea_stars.toggled.connect(lambda *_: self._draw_gsea())
+        self.gsea_title.editingFinished.connect(self._draw_gsea)
+        return self._result_layout("gsea", "GSEA — pathways", "Gene Set Enrichment Analysis on the ranked gene list.",
+                                   split, self._inspector(opts))
 
     def _draw_gsea(self):
         if self.results is None:
             return
         panel = self.gsea_panel
         panel.clear()
-        for row in self.gsea_tree.get_children():
-            self.gsea_tree.delete(row)
-        tag = self.active_tag.get()
+        self._fit_plot_height(panel, 0)
+        self.gsea_model.set_data(pd.DataFrame(columns=["pathway", "NES", "padj", "size"]))
+        tag = self.active_tag
         if not tag or tag not in self.results.per_contrast:
             panel.redraw()
             return
         gsea_tbl = self.results.per_contrast[tag].gsea_tbl
         if gsea_tbl is None or gsea_tbl.empty:
-            panel.ax.text(0.5, 0.5, "GSEA not available for this contrast.",
-                           ha="center", va="center")
+            panel.ax.text(0.5, 0.5, "GSEA not available for this contrast.", ha="center", va="center")
             panel.redraw()
             return
-
-        plot_data, msg = engine.filter_top_pathways(
-            gsea_tbl, top_n=self.top_n_pathways.get(), padj_cutoff=self.padj_cutoff.get())
-
+        plot_data, msg = engine.filter_top_pathways(gsea_tbl, top_n=self.gsea_topn.value(),
+                                                    padj_cutoff=self.padj_cutoff.value())
+        self._fit_plot_height(panel, len(plot_data))
         colors = plot_data["Direction"].map({"Up-regulated": PALETTE["up"], "Down-regulated": PALETTE["down"]})
         bars = panel.ax.barh(plot_data["pathway_clean"], plot_data["NES"], color=colors)
         panel.ax.set_xlabel("Normalized Enrichment Score (NES)")
-        title = self.gsea_title_var.get().strip() or f"Top Modulated Pathways — {self._contrast_title(tag)}"
-        panel.ax.set_title(title)
+        panel.ax.set_title(self.gsea_title.text().strip() or f"Top Modulated Pathways — {self._contrast_title(tag)}")
         panel.ax.axvline(0, color="black", linewidth=0.8)
         panel.ax.tick_params(axis="y", labelsize=8)
 
-        if self.gsea_show_asterisks.get():
+        if self.gsea_stars.isChecked():
             for bar, padj in zip(bars, plot_data["padj"]):
                 stars = ""
                 if pd.notna(padj):
-                    if padj < 0.001:
-                        stars = "***"
-                    elif padj < 0.01:
-                        stars = "**"
-                    elif padj < 0.05:
-                        stars = "*"
+                    stars = "***" if padj < 0.001 else "**" if padj < 0.01 else "*" if padj < 0.05 else ""
                 if stars:
                     width = bar.get_width()
                     offset = 0.05 * (abs(width) if width != 0 else 1)
-                    x_pos = width + offset if width >= 0 else width - offset
-                    ha = "left" if width >= 0 else "right"
-                    panel.ax.text(x_pos, bar.get_y() + bar.get_height() / 2, stars,
-                                   va="center", ha=ha, fontsize=9, fontweight="bold")
-
+                    panel.ax.text(width + offset if width >= 0 else width - offset,
+                                  bar.get_y() + bar.get_height() / 2, stars, va="center",
+                                  ha="left" if width >= 0 else "right", fontsize=9, fontweight="bold")
         xmin, xmax = panel.ax.get_xlim()
-        new_xmin = xmin*1.15 if xmin < 0 else xmin
-        new_xmax = xmax*1.15 if xmax > 0 else xmax
-        panel.ax.set_xlim(left=new_xmin, right=new_xmax)
-        
-        _hi, _lo = self._dir_names(self.results.per_contrast[tag])
-        up_patch = mpatches.Patch(color=PALETTE["up"], label=f"NES > 0: higher in {_hi}")
-        down_patch = mpatches.Patch(color=PALETTE["down"], label=f"NES < 0: higher in {_lo}")
-        panel.place_legend(handles=[up_patch, down_patch])
+        panel.ax.set_xlim(left=xmin * 1.15 if xmin < 0 else xmin, right=xmax * 1.15 if xmax > 0 else xmax)
+
+        hi, lo = self._dir_names(self.results.per_contrast[tag])
+        panel.place_legend(handles=[mpatches.Patch(color=PALETTE["up"], label=f"NES > 0: higher in {hi}"),
+                                    mpatches.Patch(color=PALETTE["down"], label=f"NES < 0: higher in {lo}")])
         panel.apply_common_style()
         panel.redraw()
-        self.status_var.set(msg)
+        self.statusBar().showMessage(msg)
 
-        for _, r in plot_data.sort_values("padj").iterrows():
-            self.gsea_tree.insert("", "end", values=(
-                r.get("pathway_clean", ""), round(r.get("NES", float("nan")), 3),
-                _fmt_sci(r.get("padj")), r.get("size", "")))
+        d = plot_data.sort_values("padj")
+        raw = pd.DataFrame({"pathway": d.get("pathway_clean", ""), "NES": d.get("NES"), "padj": d.get("padj"),
+                            "size": d.get("size", "")})
+        shown = pd.DataFrame({"pathway": raw["pathway"].astype(str), "NES": raw["NES"].map(_round_or_blank),
+                              "padj": raw["padj"].map(_fmt_sci), "size": raw["size"].astype(str)})
+        self.gsea_model.set_data(raw, shown)
+
+    def _export_gsea_table(self):
+        tag = self.active_tag
+        if not tag or self.results is None or tag not in self.results.per_contrast:
+            QMessageBox.information(self, "Info", "No GSEA results to export.")
+            return
+        tbl = self.results.per_contrast[tag].gsea_tbl
+        if tbl is None:
+            QMessageBox.information(self, "Info", "GSEA is not available for this contrast.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export GSEA table", "gsea_table.csv", "CSV (*.csv)")
+        if path:
+            tbl.to_csv(path, index=False)
+            self.notify(f"GSEA table exported to {os.path.basename(path)}")
+
+    def _build_ora_page(self) -> QWidget:
+        self.ora_topn = self._spin(3, 100, 15)
+        self.ora_type = self._combo(["Bar", "Dot"])
+        self.ora_type.setToolTip("Bar: -log10 padj as bar length with k/K, fold enrichment and padj. "
+                                 "Dot: Gene Ratio on X, size = genes, colour = padj.")
+        self.ora_title = QLineEdit()
+        exp = QPushButton("Export ORA table…")
+        exp.clicked.connect(self._export_ora_table)
+        opts = Card("Display")
+        opts.body().addWidget(field("Top N pathways", self.ora_topn))
+        opts.body().addWidget(field("Chart type", self.ora_type))
+        opts.body().addWidget(field("Custom title", self.ora_title))
+        opts.body().addWidget(exp)
+
+        expl = ("ORA (Over-Representation Analysis): tests whether the significant genes (padj and log2FC cutoffs "
+                "from Setup) are over-represented in each pathway, against the background of all genes tested. "
+                "k/K = genes in the list / genes of the pathway in the universe; FE = fold enrichment. Bar colour = "
+                "direction of the supporting genes (UP / DOWN if at least 80% agree, otherwise MIXED).")
+        self.ora_panel = PlotPanel(expl, figsize=(8.0, 4.5), redraw_callback=self._draw_ora, min_height=480)
+        self._ora_cols = ["pathway", "genes", "k/K", "FE", "padj", "direction", "N_UP", "N_DOWN"]
+        self.ora_model = DataFrameModel(pd.DataFrame(columns=self._ora_cols), align_left=(0,))
+        self.ora_view = self._table_view(self.ora_model)
+        self.ora_view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+        self.ora_view.horizontalHeader().resizeSection(0, 300)
+        split = self._plot_table_stack(self.ora_panel, self.ora_view)
+
+        self.ora_topn.valueChanged.connect(self._debounce(self._draw_ora, 200))
+        self.ora_type.activated.connect(lambda *_: self._draw_ora())
+        self.ora_title.editingFinished.connect(self._draw_ora)
+        return self._result_layout("ora", "ORA — over-representation", "Are the significant genes enriched in a pathway?",
+                                   split, self._inspector(opts))
 
     def _draw_ora(self):
         if self.results is None:
@@ -3007,20 +1680,19 @@ class DEAApp(ttk.Frame):
         if self._ora_colorbar is not None:
             try:
                 self._ora_colorbar.remove()
-            except Exception:
+            except Exception: 
                 pass
             self._ora_colorbar = None
         panel.clear()
-        for row in self.ora_tree.get_children():
-            self.ora_tree.delete(row)
-        tag = self.active_tag.get()
+        self._fit_plot_height(panel, 0)
+        self.ora_model.set_data(pd.DataFrame(columns=self._ora_cols))
+        tag = self.active_tag
         if not tag or tag not in self.results.per_contrast:
             panel.redraw()
             return
         res = self.results.per_contrast[tag]
         ora_tbl = res.ora_tbl
         if ora_tbl is None or ora_tbl.empty:
-            import textwrap
             if res.ora_meta is None:
                 text = "ORA was not run for this analysis."
             else:
@@ -3032,184 +1704,430 @@ class DEAApp(ttk.Frame):
             panel.redraw()
             return
 
-        cutoff = self.padj_cutoff.get()
-        plot_data, msg = engine.filter_top_ora(
-            ora_tbl, top_n=self.top_n_ora.get(), padj_cutoff=cutoff)
+        cutoff = self.padj_cutoff.value()
+        plot_data, msg = engine.filter_top_ora(ora_tbl, top_n=self.ora_topn.value(), padj_cutoff=cutoff)
+        self._fit_plot_height(panel, len(plot_data))
         n_in = (res.ora_meta or {}).get("n_input_genes")
-        title = self.ora_title_var.get().strip() or f"Top Enriched Pathways (ORA) — {self._contrast_title(tag)}"
+        title = self.ora_title.text().strip() or f"Top Enriched Pathways (ORA) — {self._contrast_title(tag)}"
         dir_colors = {"UP": PALETTE["up"], "DOWN": PALETTE["down"], "MIXED": PALETTE["ns"]}
 
-        if self.ora_chart_type.get() == "Dot":
+        if self.ora_type.currentText() == "Dot":
             from matplotlib.colors import LinearSegmentedColormap
             d = plot_data.sort_values("GeneRatioNum", kind="stable")
             cmap = LinearSegmentedColormap.from_list("ora_padj", [PALETTE["up"], PALETTE["down"]])
-            sc = panel.ax.scatter(d["GeneRatioNum"], d["pathway_clean"],
-                                   s=20 + 8 * d["Count"], c=d["p.adjust"], cmap=cmap)
+            sc = panel.ax.scatter(d["GeneRatioNum"], d["pathway_clean"], s=20 + 8 * d["Count"],
+                                  c=d["p.adjust"], cmap=cmap)
             self._ora_colorbar = panel.figure.colorbar(sc, ax=panel.ax, pad=0.02)
             self._ora_colorbar.set_label("padj")
             panel.ax.set_xlabel("Gene Ratio")
-            panel.ax.tick_params(axis="y", labelsize=8)
-            panel.ax.set_title(title)
         else:
             colors = plot_data["Direction"].map(dir_colors).fillna(PALETTE["ns"])
-            bars = panel.ax.barh(plot_data["pathway_clean"], plot_data["neglog10"],
-                                  color=colors, height=0.7)
+            bars = panel.ax.barh(plot_data["pathway_clean"], plot_data["neglog10"], color=colors, height=0.7)
             xmax = max(float(plot_data["neglog10"].max()), -np.log10(cutoff))
             if not np.isfinite(xmax) or xmax <= 0:
                 xmax = 1.0
             for bar, (_, r) in zip(bars, plot_data.iterrows()):
-                label = (f"{int(r['Count'])}/{int(r['SetSize'])} genes "
-                         f"({int(r['N_UP'])} UP, {int(r['N_DOWN'])} DOWN) | "
-                         f"FE {r['FoldEnrichment']:.1f} | padj {r['p.adjust']:.1e}")
-                panel.ax.text(bar.get_width() + 0.01 * xmax, bar.get_y() + bar.get_height() / 2,
-                               label, va="center", ha="left", fontsize=7)
+                label = (f"{int(r['Count'])}/{int(r['SetSize'])} genes ({int(r['N_UP'])} UP, {int(r['N_DOWN'])} DOWN)"
+                         f" | FE {r['FoldEnrichment']:.1f} | padj {r['p.adjust']:.1e}")
+                panel.ax.text(bar.get_width() + 0.01 * xmax, bar.get_y() + bar.get_height() / 2, label,
+                              va="center", ha="left", fontsize=7)
             panel.ax.axvline(-np.log10(cutoff), linestyle="--", color=PALETTE["err"], linewidth=1)
             panel.ax.set_xlim(0, xmax * 1.9)
             panel.ax.set_xlabel(r"$-\log_{10}$(padj)")
-            panel.ax.tick_params(axis="y", labelsize=8)
-            panel.ax.set_title(title)
-            handles = [
-                mpatches.Patch(color=PALETTE["up"], label=f"UP: higher in {self._dir_names(res)[0]} (>= 80% of genes)"),
-                mpatches.Patch(color=PALETTE["down"], label=f"DOWN: higher in {self._dir_names(res)[1]} (>= 80% of genes)"),
-                mpatches.Patch(color=PALETTE["ns"], label="MIXED"),
-            ]
-            panel.place_legend(handles=handles)
-
+            hi, lo = self._dir_names(res)
+            panel.place_legend(handles=[
+                mpatches.Patch(color=PALETTE["up"], label=f"UP: higher in {hi} (>= 80% of genes)"),
+                mpatches.Patch(color=PALETTE["down"], label=f"DOWN: higher in {lo} (>= 80% of genes)"),
+                mpatches.Patch(color=PALETTE["ns"], label="MIXED")])
+        panel.ax.tick_params(axis="y", labelsize=8)
+        panel.ax.set_title(title)
         panel.apply_common_style()
         panel.redraw()
-        self.status_var.set(msg + (f" Genes in input: {n_in}." if n_in else ""))
+        self.statusBar().showMessage(msg + (f" Genes in input: {n_in}." if n_in else ""))
 
-        for _, r in plot_data.sort_values("p.adjust", kind="stable").iterrows():
-            self.ora_tree.insert("", "end", values=(
-                r.get("pathway_clean", ""), int(r["Count"]),
-                f"{int(r['Count'])}/{int(r['SetSize'])}",
-                round(float(r["FoldEnrichment"]), 2), _fmt_sci(r.get("p.adjust")),
-                r.get("Direction", ""),
-                int(r["N_UP"]), int(r["N_DOWN"])))
+        d = plot_data.sort_values("p.adjust", kind="stable")
+        raw = pd.DataFrame({
+            "pathway": d.get("pathway_clean", ""), "genes": d["Count"].astype(int),
+            "k/K": d["Count"].astype(float) / d["SetSize"].astype(float),
+            "FE": d["FoldEnrichment"].astype(float), "padj": d["p.adjust"].astype(float),
+            "direction": d.get("Direction", ""), "N_UP": d["N_UP"].astype(int), "N_DOWN": d["N_DOWN"].astype(int)})
+        shown = pd.DataFrame({
+            "pathway": raw["pathway"].astype(str), "genes": raw["genes"].astype(str),
+            "k/K": d["Count"].astype(int).astype(str) + "/" + d["SetSize"].astype(int).astype(str),
+            "FE": raw["FE"].round(2).astype(str), "padj": raw["padj"].map(_fmt_sci),
+            "direction": raw["direction"].astype(str), "N_UP": raw["N_UP"].astype(str),
+            "N_DOWN": raw["N_DOWN"].astype(str)})
+        self.ora_model.set_data(raw, shown)
 
-    def _sort_tree(self, tree: ttk.Treeview, col: str, reverse: bool):
-        data = [(tree.set(k, col), k) for k in tree.get_children("")]
+    def _export_ora_table(self):
+        tag = self.active_tag
+        if not tag or self.results is None or tag not in self.results.per_contrast:
+            QMessageBox.information(self, "Info", "No ORA results to export.")
+            return
+        tbl = self.results.per_contrast[tag].ora_tbl
+        if tbl is None or tbl.empty:
+            QMessageBox.information(self, "Info", "ORA is not available for this contrast.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export ORA table", "ora_table.csv", "CSV (*.csv)")
+        if path:
+            tbl.to_csv(path, index=False)
+            self.notify(f"ORA table exported to {os.path.basename(path)}")
 
-        def key(v):
+    def _build_genes_page(self) -> QWidget:
+        self.gene_entry = QLineEdit()
+        self.gene_entry.setPlaceholderText("e.g. TP53")
+        self.gene_entry.setToolTip("Gene symbol as in the analysis (case-insensitive). Genes removed by the "
+                                   "low-counts filter are not available.")
+        self.gene_var = RefreshCombo(self._refresh_gene_plot_columns)
+        self.gene_var.setToolTip("Metadata column to compare with expression. Numeric → dot plot with Spearman; "
+                                 "text → box plot with Mann-Whitney / Kruskal-Wallis.")
+        self.gene_kind = self._combo(pcol.KIND_CHOICES)
+        plot_btn = QPushButton("Plot")
+        plot_btn.setObjectName("primary")
+        plot_btn.clicked.connect(self._draw_gene_plot)
+        c1 = Card("Gene & variable")
+        c1.body().addWidget(field("Gene", self.gene_entry))
+        c1.body().addWidget(field("Metadata (Y axis)", self.gene_var))
+        c1.body().addWidget(field("Type", self.gene_kind))
+        c1.body().addWidget(plot_btn)
+
+        self.gene_color = RefreshCombo(self._refresh_gene_plot_columns)
+        self.gene_color.addItem(gplot.NO_COLOR)
+        self.gene_color.setToolTip("Colors the points (one point = one sample) by any metadata column.")
+        self.gene_color_kind = self._combo(pcol.KIND_CHOICES)
+        self.gene_cmap = self._combo(pcol.CMAPS.keys(), "Red → Blue")
+        self.gene_colorblind = QCheckBox("Colour-blind-friendly palette")
+        c2 = Card("Colour points by")
+        c2.body().addWidget(field("Metadata column", self.gene_color))
+        c2.body().addWidget(field("Type", self.gene_color_kind))
+        c2.body().addWidget(field("Scale (numeric)", self.gene_cmap))
+        c2.body().addWidget(self.gene_colorblind)
+
+        self.gene_labels = QCheckBox("Show sample labels")
+        self.gene_trend = QCheckBox("Linear trend line (numeric metadata)")
+        self.gene_title = QLineEdit()
+        exp = QPushButton("Export plot data…")
+        exp.clicked.connect(self._export_gene_plot_data)
+        c3 = Card("Display")
+        c3.body().addWidget(self.gene_labels)
+        c3.body().addWidget(self.gene_trend)
+        c3.body().addWidget(field("Custom title", self.gene_title))
+        c3.body().addWidget(exp)
+
+        main = QWidget()
+        mv = QVBoxLayout(main)
+        mv.setContentsMargins(0, 0, 0, 0)
+        mv.setSpacing(8)
+        self.gene_msg = QLabel("Run an analysis first, then type a gene and press 'Plot'.")
+        self.gene_msg.setObjectName("muted")
+        self.gene_msg.setWordWrap(True)
+        expl = ("Gene counts: each point is a SAMPLE; X axis = expression of the chosen gene (log2 of the "
+                "size-factor-normalized counts). With a numeric metadata column the chart is a dot plot with "
+                "Spearman's rho; with a text column it is a box plot per group with Mann-Whitney (2 groups) or "
+                "Kruskal-Wallis (>2). The normalized values are exploratory only: the differential expression "
+                "statistics come from the raw counts model.")
+        self.gene_panel = PlotPanel(expl, redraw_callback=self._draw_gene_plot)
+        mv.addWidget(self.gene_msg)
+        mv.addWidget(self.gene_panel, 1)
+
+        self.gene_entry.returnPressed.connect(self._draw_gene_plot)
+        for w in (self.gene_var, self.gene_kind, self.gene_color, self.gene_color_kind, self.gene_cmap):
+            w.activated.connect(lambda *_: self._draw_gene_plot())
+        for w in (self.gene_colorblind, self.gene_labels, self.gene_trend):
+            w.toggled.connect(lambda *_: self._draw_gene_plot())
+        self.gene_title.editingFinished.connect(self._draw_gene_plot)
+        return self._result_layout("genes", "Gene counts", "Expression of a single gene across all samples.",
+                                   main, self._inspector(c1, c2, c3), with_contrast=False)
+
+    def _refresh_gene_plot_columns(self):
+        if not hasattr(self, "gene_var") or not hasattr(self, "gene_color"):
+            return
+        cols, cols_y = [], []
+        path = self.metadata_path.strip()
+        if path and os.path.isfile(path):
             try:
-                return float(v[0])
-            except (ValueError, TypeError):
-                return v[0]
-        data.sort(key=key, reverse=reverse)
-        for index, (_, k) in enumerate(data):
-            tree.move(k, "", index)
-        tree.heading(col, command=lambda: self._sort_tree(tree, col, not reverse))
+                meta = self._read_meta_cached(path)
+                cols = list(meta.columns)
+                sname = pcol.resolve_column(meta, self._parse_col(self.sample_col.text()))
+                cols_y = [c for c in cols if c != sname]
+            except Exception:  # noqa: BLE001
+                cols, cols_y = [], []
+        cur_y, cur_c = self.gene_var.currentText(), self.gene_color.currentText()
+        self.gene_var.blockSignals(True)
+        self.gene_color.blockSignals(True)
+        self.gene_var.clear()
+        self.gene_var.addItems(cols_y)
+        self.gene_var.setCurrentText(cur_y if cur_y in cols_y else (cols_y[0] if cols_y else ""))
+        items_c = [gplot.NO_COLOR] + cols
+        self.gene_color.clear()
+        self.gene_color.addItems(items_c)
+        self.gene_color.setCurrentText(cur_c if cur_c in items_c else gplot.NO_COLOR)
+        self.gene_var.blockSignals(False)
+        self.gene_color.blockSignals(False)
+
+    def _draw_gene_plot(self):
+        panel = getattr(self, "gene_panel", None)
+        if panel is None:
+            return
+        if self._gene_colorbar is not None:
+            try:
+                self._gene_colorbar.remove()
+            except Exception:  
+                pass
+            self._gene_colorbar = None
+        panel.clear()
+        self._gene_plot_frame = None
+        if self.results is None:
+            panel.redraw()
+            return
+        nm = self.results.norm_matrix
+        if nm is None:
+            self.gene_msg.setText("The normalized expression matrix is not available for this run "
+                                  "(see the Log page for the reason).")
+            panel.redraw()
+            return
+        gene = self.gene_entry.text().strip()
+        if not gene:
+            self.gene_msg.setText("Type a gene symbol and press 'Plot'.")
+            panel.redraw()
+            return
+        var = self.gene_var.currentText()
+        if not var:
+            self.gene_msg.setText("Select a metadata column for the Y axis.")
+            panel.redraw()
+            return
+
+        meta_path, sample_col = self._pca_meta_source()
+        try:
+            meta = self._read_meta_cached(meta_path)
+            frame = gplot.build_frame(nm, meta, sample_col, gene, var, self.gene_kind.currentText())
+        except Exception as e:  # noqa: BLE001
+            self.gene_msg.setText(f"Warning: {e}")
+            panel.redraw()
+            return
+        try:
+            spec = gplot.color_spec_for(frame, meta, sample_col, self.gene_color.currentText(),
+                                        self.gene_color_kind.currentText(), self.gene_colorblind.isChecked(),
+                                        self.gene_cmap.currentText())
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Gene counts colors",
+                                f"Cannot color by '{self.gene_color.currentText()}':\n{e}\n\n"
+                                "Falling back to a single color.")
+            self.gene_color.setCurrentText(gplot.NO_COLOR)
+            spec = gplot.color_spec_for(frame, meta, sample_col, gplot.NO_COLOR)
+
+        artists, stats, extra = gplot.draw_gene_plot(
+            panel.ax, frame, spec, self.results.norm_label, size=60, alpha=0.85,
+            title=self.gene_title.text().strip() or None,
+            show_sample_labels=self.gene_labels.isChecked(), show_trend=self.gene_trend.isChecked())
+        if panel.legend_enabled():
+            self._gene_colorbar = gplot.add_legend_or_colorbar(panel.figure, panel.ax, spec, extra,
+                                                               legend_fn=panel.place_legend)
+        panel.apply_common_style()
+        self._gene_plot_frame = (frame, stats)
+
+        note = f"{frame['gene']} vs {var}: {len(frame['df'])} samples plotted"
+        if not spec.get("uniform"):
+            note += f" | colored by '{spec['column']}'"
+            if spec.get("n_missing"):
+                note += f" ({spec['n_missing']} without a value, grey)"
+        if spec.get("n_unmatched"):
+            note += f" | Warning: {spec['n_unmatched']} sample IDs not found in the metadata"
+        self.gene_msg.setText(note)
+
+        if HAS_MPLCURSORS and artists:
+            all_sc = [a for a, _ in artists]
+            all_sub = [sdf for _, sdf in artists]
+            col_name = spec["column"]
+
+            def fmt(idx_tuple):
+                ai, pi = idx_tuple
+                row = all_sub[ai].iloc[pi]
+                txt = f"{row.get('SampleID', '?')}\nexpr: {row['expr']:.2f} | {var}: {row['val']}"
+                if not spec.get("uniform"):
+                    cv = row.get("_val")
+                    txt += f"\n{col_name}: {'n.a.' if pd.isna(cv) else cv}"
+                return txt
+            panel.enable_hover(all_sc, lambda idx: fmt(idx) if isinstance(idx, tuple) else str(idx))
+        panel.redraw()
+
+    def _export_gene_plot_data(self):
+        if not self._gene_plot_frame:
+            QMessageBox.information(self, "Info", "Draw a gene plot first.")
+            return
+        frame, _stats = self._gene_plot_frame
+        path, _ = QFileDialog.getSaveFileName(self, "Save plot data", f"{frame['gene']}_vs_{frame['variable']}.csv",
+                                              "CSV (*.csv)")
+        if not path:
+            return
+        out = frame["df"].rename(columns={"expr": f"expression ({self.results.norm_label})",
+                                          "val": frame["variable"]})
+        try:
+            out.to_csv(path, index=False)
+        except OSError as e:
+            QMessageBox.critical(self, "Error", f"Unable to save the file: {e}")
+            return
+        self.notify(f"Plot data saved to {os.path.basename(path)}")
+
+    def _build_log_page(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(24, 18, 24, 18)
+        v.setSpacing(12)
+        v.addWidget(self._page_title("Log", "Everything the R pipeline printed: messages, warnings and errors."))
+        bar = QHBoxLayout()
+        clear = QPushButton("Clear log")
+        clear.setObjectName("danger")
+        clear.clicked.connect(lambda: self.log_text.clear())
+        save = QPushButton("Save log to file…")
+        save.clicked.connect(self._save_log)
+        bar.addWidget(clear)
+        bar.addWidget(save)
+        bar.addStretch()
+        v.addLayout(bar)
+        self.log_text = QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.log_text.setStyleSheet(
+            f"QPlainTextEdit {{ background: #0e1f31; color: #d5e4f3; border: none; border-radius: 12px; "
+            f"padding: 14px; font-family: {MONO}; font-size: 9.5pt; selection-background-color: #1f6fb2; }}")
+        v.addWidget(self.log_text, 1)
+        return page
+
+    def _log(self, msg: str):
+        self.log_text.appendPlainText(msg)
+
+    def _save_log(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save log", "log.txt", "Text (*.txt)")
+        if path:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(self.log_text.toPlainText())
+            self.notify(f"Log saved to {os.path.basename(path)}")
 
     def _export_pdf_report(self):
         if self.results is None or not self.results.per_contrast:
-            messagebox.showinfo("Info", "Run an analysis first: there are no results to report.")
+            QMessageBox.information(self, "Info", "Run an analysis first: there are no results to report.")
             return
         default = f"DEA_report_{datetime.datetime.now():%Y%m%d_%H%M}.pdf"
-        path = filedialog.asksaveasfilename(
-            title="Save PDF report", defaultextension=".pdf", initialfile=default,
-            filetypes=[("PDF", "*.pdf")])
+        path, _ = QFileDialog.getSaveFileName(self, "Save PDF report", default, "PDF (*.pdf)")
         if not path:
             return
         results = self.results
         params = dict(self.run_params or {})
-        params["pca_color"] = self.pca_color_settings()   # same coloring as the on-screen PCA
-        if getattr(self, "_gene_plot_frame", None):        # gene plot currently on screen -> extra report page
+        params["pca_color"] = self.pca_color_settings()  # stessa colorazione della PCA a schermo
+        if self._gene_plot_frame:
             params["gene_plot"] = {
-                "gene": self._gene_plot_frame[0]["gene"], "variable": self.gene_plot_var.get(),
-                "kind": self.gene_plot_kind.get(), "color_by": self.gene_plot_color_col.get(),
-                "color_kind": self.gene_plot_color_kind.get(), "cmap": self.gene_plot_cmap.get(),
-                "colorblind": bool(self.gene_plot_colorblind.get()), "labels": bool(self.gene_plot_labels.get()),
-                "trend": bool(self.gene_plot_trend.get())}
-        log_text = self.log_text.get("1.0", "end")
-        self.report_button.configure(state="disabled")
-        self.status_var.set("Generating PDF report... this may take a few seconds.")
+                "gene": self._gene_plot_frame[0]["gene"], "variable": self.gene_var.currentText(),
+                "kind": self.gene_kind.currentText(), "color_by": self.gene_color.currentText(),
+                "color_kind": self.gene_color_kind.currentText(), "cmap": self.gene_cmap.currentText(),
+                "colorblind": self.gene_colorblind.isChecked(), "labels": self.gene_labels.isChecked(),
+                "trend": self.gene_trend.isChecked()}
+        log_text = self.log_text.toPlainText()
+        self.report_button.setEnabled(False)
+        self.statusBar().showMessage("Generating PDF report… this may take a few seconds.")
+        self._busy(True)
 
-        def task():
-            try:
-                report_pdf.build_report(path, results, params, log_text)
-                self.root.after(0, lambda: self._on_report_done(path, None))
-            except Exception as exc:
-                self.root.after(0, lambda err=exc: self._on_report_done(path, err))
+        def task(_cb):
+            report_pdf.build_report(path, results, params, log_text)
+            return path
 
-        threading.Thread(target=task, daemon=True).start()
+        w = Worker(task, "PDF report failed", self)
+        w.done.connect(self._on_report_done)
+        w.failed.connect(lambda title, err: (self.statusBar().showMessage("PDF report failed."),
+                                             QMessageBox.critical(self, "Error",
+                                                                  f"Could not create the PDF report:\n{err}")))
+        w.finished.connect(lambda: (self.report_button.setEnabled(True), self._busy(False)))
+        self._start(w)
 
-    def _on_report_done(self, path: str, err: Exception | None):
-        self.report_button.configure(state="normal")
-        if err is not None:
-            self.status_var.set("PDF report failed.")
-            messagebox.showerror("Error", f"Could not create the PDF report:\n{err}")
+    def _on_report_done(self, path: str):
+        self.statusBar().showMessage(f"PDF report saved to: {path}")
+        box = QMessageBox(self)
+        box.setWindowTitle("Report saved")
+        box.setText(f"Report saved to:\n{path}\n\nOpen it now?")
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        if box.exec() == QMessageBox.Yes:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).resolve())))
+
+    def notify(self, text: str):
+        self.toast.show_message(text)
+        self.statusBar().showMessage(text)
+
+    def _check_environment(self):
+        problems = engine.check_environment()
+        if problems:
+            QMessageBox.warning(self, "Environment check",
+                                "Some issues were detected:\n\n" + "\n".join(f"- {p}" for p in problems))
+
+    def _show_help(self, tab_key: str):
+        content = HELP_CONTENT.get(tab_key)
+        if not content:
             return
-        self.status_var.set(f"PDF report saved to: {path}")
-        if messagebox.askyesno("Report saved", f"Report saved to:\n{path}\n\nOpen it now?"):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(content["title"])
+        dlg.resize(700, 600)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        head = QFrame()
+        head.setObjectName("header")
+        hl = QHBoxLayout(head)
+        hl.setContentsMargins(22, 14, 22, 14)
+        t = QLabel(content["title"])
+        t.setObjectName("appTitle")
+        t.setStyleSheet("font-size: 14pt;")
+        hl.addWidget(t)
+        v.addWidget(head)
+        tabs = QTabWidget()
+        for label, key in (("What it means", "meaning"), ("How to use it", "usage")):
+            te = QTextEdit()
+            te.setReadOnly(True)
+            te.setFrameShape(QFrame.NoFrame)
+            te.setPlainText(content[key])
+            te.setStyleSheet("QTextEdit { padding: 14px; font-size: 10.5pt; background: white; border: none; }")
+            tabs.addTab(te, label)
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(16, 14, 16, 14)
+        bl.addWidget(tabs)
+        close = QPushButton("Close")
+        close.setObjectName("primary")
+        close.clicked.connect(dlg.accept)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(close)
+        bl.addLayout(row)
+        v.addWidget(body, 1)
+        dlg.exec()
+
+    def closeEvent(self, e):
+        QSettings("DEAExplorer", "Main").setValue("geometry", self.saveGeometry())
+        hm = getattr(self, "_heatmap", None)
+        if hm is not None:
             try:
-                webbrowser.open(Path(path).resolve().as_uri())
-            except Exception:
+                hm.close()
+            except RuntimeError:  
                 pass
+        super().closeEvent(e)
 
-    def _export_gene_table(self):
-        tag = self.active_tag.get()
-        if not tag or self.results is None or tag not in self.results.per_contrast:
-            messagebox.showinfo("Info", "No results to export.")
-            return
-        path = filedialog.asksaveasfilename(defaultextension=".csv",
-                                             filetypes=[("CSV", "*.csv")])
-        if path:
-            res = self.results.per_contrast[tag]
-            out = engine.annotate_regulation(res.ranked_tbl, res.group_high, res.group_low,
-                                             self.padj_cutoff.get(), self.lfc_cutoff.get())
-            out.to_csv(path, index=False)
-            self.status_var.set(f"Table exported to: {path}")
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if hasattr(self, "toast") and self.toast.isVisible():
+            self.toast.move(self.centralWidget().width() - self.toast.width() - 24,
+                            self.centralWidget().height() - self.toast.height() - 52)
 
-    def _export_gsea_table(self):
-        tag = self.active_tag.get()
-        if not tag or self.results is None or tag not in self.results.per_contrast:
-            messagebox.showinfo("Info", "No GSEA results to export.")
-            return
-        gsea_tbl = self.results.per_contrast[tag].gsea_tbl
-        if gsea_tbl is None:
-            messagebox.showinfo("Info", "GSEA is not available for this contrast.")
-            return
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
-        if path:
-            gsea_tbl.to_csv(path, index=False)
-            self.status_var.set(f"GSEA table exported to: {path}")
-
-    def _export_ora_table(self):
-        tag = self.active_tag.get()
-        if not tag or self.results is None or tag not in self.results.per_contrast:
-            messagebox.showinfo("Info", "No ORA results to export.")
-            return
-        ora_tbl = self.results.per_contrast[tag].ora_tbl
-        if ora_tbl is None or ora_tbl.empty:
-            messagebox.showinfo("Info", "ORA is not available for this contrast.")
-            return
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
-        if path:
-            ora_tbl.to_csv(path, index=False)
-            self.status_var.set(f"ORA table exported to: {path}")
-
-def _fmt_sci(value) -> str:
-    if value is None or pd.isna(value):
-        return ""
-    try:
-        return f"{float(value):.2e}"
-    except (TypeError, ValueError):
-        return str(value)
-
-def launch():
-    root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
-    root.title("DEA Explorer")
-    try:
-        logo_icon = tk.PhotoImage(file="logo.png")
-        root.iconphoto(False, logo_icon)
-    except tk.TclError:
-        pass
-    root.geometry("1200x860")
-    root.minsize(1000, 700)
-    apply_theme(root)
-    app = DEAApp(root)
-    root.mainloop()
-
+def launch() -> int:
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setApplicationName("DEA Explorer")
+    apply_theme(app)
+    script_dir = Path(__file__).resolve().parent
+    for name in ("logo.png", "GUI_logo.png"):
+        p = script_dir / name
+        if p.exists():
+            app.setWindowIcon(QIcon(str(p)))
+            break
+    win = DEAWindow()
+    win.show()
+    return app.exec()
 
 if __name__ == "__main__":
-    launch()
+    sys.exit(launch())
