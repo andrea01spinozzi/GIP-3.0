@@ -73,4 +73,4 @@ The automated assessment highlights that downstream Differential Expression Anal
 
 ## 3. Dataset Purpose
 
-The data in this set was **intentionally designed with critical confounding factors**. This setup serves
+The data in this set was **intentionally designed with critical confounding factors**. This setup serves to demonstrate and showcase **StandHard's** capability to automatically detect and flag potential **batch effects** and methodological flaws in biological data before running downstream analyses.
