@@ -68,3 +68,9 @@ L'analisi automatica evidenzia che l'analisi di espressione differenziale (DEA) 
 | **Sesso, RIN, Ischemia, Etnia** | < 11% | `BASSO` | Nessun impatto critico rilevato. |
 
 > 📌 **Avviso principale**: Poiché i dati tumorali (GDC) e sani (GTEx) sono stati sequenziati ed elaborati con pipeline differenti, le differenze di espressione genica rilevate rischiano di riflettere l'**effetto batch** e non la vera biologia del tumore.
+
+---
+
+## 3. Scopo del Dataset
+
+I dati presenti in questo set sono stati configurati **volutamente con un livello critico di confondimento**. Questo approccio serve a dimostrare ed evidenziare le potenzialità di **StandHard** nell'identificare e segnalare automaticamente i possibili **effetti batch** e le criticità metodologiche presenti nei dati biologici prima di procedere con l'analisi downstream.
